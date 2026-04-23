@@ -1,0 +1,31 @@
+{
+    "name": "syncbridge/prestashop-aboutyou",
+    "description": "PrestaShop ↔ AboutYou Sync Platform",
+    "type": "project",
+    "require": {
+        "php": ">=8.1",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*",
+        "ext-gd": "*",
+        "ext-json": "*",
+        "vlucas/phpdotenv": "^5.5"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "SyncBridge\\Database\\": "./",
+            "SyncBridge\\Services\\": "./",
+            "SyncBridge\\Integration\\": "src/Integration/",
+            "SyncBridge\\Support\\": "src/Support/"
+        }
+    },
+    "scripts": {
+        "migrate": "php migrate.php",
+        "test": "phpunit"
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}

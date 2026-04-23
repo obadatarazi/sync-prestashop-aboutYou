@@ -1,0 +1,3 @@
+[2026-04-22 11:46:29] sync.WARNING: Could not load AY category requirement metadata {"category_id":57,"error":"404 metadata not found"}
+[2026-04-22 11:46:29] sync.WARNING: Could not load AY category requirement metadata {"category_id":57,"error":"404 metadata not found"}
+[2026-04-22 11:46:29] sync.WARNING: Using fallback category requirement metadata from local defaults {"category_id":57,"fallback_groups":1,"fallback_text_fields":["material_composition_textile"]}
