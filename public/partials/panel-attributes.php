@@ -21,4 +21,25 @@
       <tbody id="attributes-body"><tr><td colspan="6" class="loading"><span class="spin">⟳</span> Loading...</td></tr></tbody>
     </table></div>
   </div>
+  <div class="card">
+    <div class="ch">
+      <div>
+        <div class="ct">Required Group Defaults</div>
+        <div class="cs">Configure fallback default AY options for required attribute groups per category.</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button class="btn btn-sm" id="req-defaults-refresh">Refresh</button>
+        <button class="btn btn-p btn-sm" id="req-defaults-save">Save Defaults</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+      <input class="fi" id="req-defaults-category-id" style="max-width:200px;" placeholder="AY Category ID (0 = global)">
+      <button class="btn btn-sm" id="req-defaults-add-row">Add Row</button>
+      <span id="req-defaults-result" style="font-size:12px;color:var(--muted);"></span>
+    </div>
+    <div class="tw"><table>
+      <thead><tr><th>AY Category ID</th><th>AY Group ID</th><th>AY Group Name</th><th>Default AY ID</th><th>Default Label</th></tr></thead>
+      <tbody id="req-defaults-body"><tr><td colspan="5" class="loading"><span class="spin">⟳</span> Loading...</td></tr></tbody>
+    </table></div>
+  </div>
 </div>

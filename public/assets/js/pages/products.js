@@ -221,6 +221,10 @@ function renderProductDetail(d) {
       </div>
       <div class="card">
         <div class="ch"><div><div class="ct">Images & Sync History</div><div class="cs">Processed images and latest product-specific logs</div></div></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+          <button class="btn btn-sm" id="product-detail-retry-images">Retry Failed Images</button>
+          <span class="mono">${images.filter(i => i.status === 'error').length} failed · ${images.filter(i => i.status === 'pending').length} pending</span>
+        </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:10px;margin-bottom:14px;">
           ${images.length ? images.map(img => `
             <a href="${esc(img.public_url || img.source_url || '#')}" target="_blank" style="text-decoration:none;color:inherit;">
@@ -229,6 +233,7 @@ function renderProductDetail(d) {
                   ${img.public_url || img.source_url ? `<img src="${esc(img.public_url || img.source_url)}" style="max-width:100%;max-height:100%;object-fit:cover;">` : '<span class="mono">No image</span>'}
                 </div>
                 <div class="mono" style="margin-top:6px;">${esc(img.status || 'pending')}</div>
+                ${img.error_message ? `<div style="margin-top:4px;font-size:10px;line-height:1.3;color:var(--red);white-space:normal;">${esc(img.error_message)}</div>` : ''}
               </div>
             </a>`).join('') : `<div class="mono">No processed images yet</div>`}
         </div>
@@ -290,6 +295,7 @@ function renderProductDetail(d) {
   document.getElementById('product-detail-save-maps').addEventListener('click', saveProductDetailMappings);
   document.getElementById('product-detail-auto-map').addEventListener('click', autoMapProductDetailMappings);
   document.getElementById('product-detail-save-eans').addEventListener('click', saveProductVariantEans);
+  document.getElementById('product-detail-retry-images').addEventListener('click', retryProductFailedImages);
 }
 
 async function saveProductDetailSettings() {
@@ -366,6 +372,19 @@ async function saveProductVariantEans() {
   currentProductDetail = r.data.data.detail;
   renderProductDetail(currentProductDetail);
   toast(`Saved ${r.data.data.saved} variant EAN value(s)`, 'ok');
+}
+
+async function retryProductFailedImages() {
+  if (!currentProductDetail?.product?.ps_id) return;
+  const psId = Number(currentProductDetail.product.ps_id);
+  const r = await api('image_retry_failed', { ps_id: psId });
+  if (!r.ok || !r.data?.ok) {
+    toast(r.data?.error || 'Failed to retry images', 'err');
+    return;
+  }
+  const data = r.data.data || {};
+  toast(`Image retry done: ${Number(data.ok || 0)} ok, ${Number(data.failed || 0)} failed`, Number(data.failed || 0) ? 'info' : 'ok');
+  await viewProduct(psId);
 }
 
 function wireProductsPage() {

@@ -8,7 +8,7 @@ async function loadSettings() {
   settingsCache.forEach(s => { (groups[s.group_name] = groups[s.group_name]||[]).push(s); });
 
   const groupLabels = { prestashop:'PrestaShop', aboutyou:'AboutYou Seller Center',
-    sync:'Sync Parameters', images:'Image Normalization', notifications:'Notifications' };
+    sync:'Sync Parameters', images:'Image Normalization', notifications:'Notifications', features:'Feature Flags' };
 
   document.getElementById('settings-form').innerHTML = `
     <div class="g2">${Object.entries(groups).map(([g, fields]) => `
@@ -25,10 +25,27 @@ async function loadSettings() {
           </div>`).join('')}
       </div>`).join('')}
     </div>`;
+  renderFeatureFlags(groups.features || []);
 
   if (!document.getElementById('scheduler-sync-path').value) {
     document.getElementById('scheduler-sync-path').value = '/absolute/path/to/SyncBridge/bin/sync.php';
   }
+}
+
+function renderFeatureFlags(flags) {
+  const el = document.getElementById('feature-flags');
+  if (!el) return;
+  if (!Array.isArray(flags) || !flags.length) {
+    el.textContent = 'No feature flags found.';
+    return;
+  }
+  el.innerHTML = flags.map(f => {
+    const on = String(f.value) === 'true';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);">
+      <span>${esc(f.label || f.key)}</span>
+      <span class="badge ${on ? 'b-ok' : 'b-gray'}">${on ? 'enabled' : 'disabled'}</span>
+    </div>`;
+  }).join('');
 }
 
 function wireSettingsPage() {

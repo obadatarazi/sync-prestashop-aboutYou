@@ -1,5 +1,7 @@
 'use strict';
 
+let requiredGroupDefaultsDraft = [];
+
 async function loadAttributeMappings() {
   const tbody = document.getElementById('attributes-body');
   tbody.innerHTML = '<tr><td colspan="6" class="loading"><span class="spin">⟳</span></td></tr>';
@@ -18,6 +20,7 @@ async function loadAttributeMappings() {
     document.getElementById('attr-category-id').value = settingsMap.ay_category_id || '';
   }
   renderAttributeMappings();
+  await loadRequiredGroupDefaults(Number(document.getElementById('attr-category-id')?.value || 0));
 }
 
 function renderAttributeMappings() {
@@ -101,10 +104,108 @@ function applyAttributeMapping(mapType, psLabel, mapping) {
   toast(`Mapped ${mapType} "${psLabel}" to AY#${mapping.ay_id}`, 'ok');
 }
 
+async function loadRequiredGroupDefaults(categoryIdOverride = null) {
+  const tbody = document.getElementById('req-defaults-body');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="5" class="loading"><span class="spin">⟳</span></td></tr>';
+  const categoryInput = document.getElementById('req-defaults-category-id');
+  const categoryId = categoryIdOverride !== null
+    ? Number(categoryIdOverride || 0)
+    : Number(categoryInput?.value || document.getElementById('attr-category-id')?.value || 0);
+  if (categoryInput && categoryIdOverride !== null) {
+    categoryInput.value = String(categoryId || '');
+  }
+  const r = await api('required_group_defaults', { category_id: categoryId > 0 ? categoryId : undefined });
+  if (!r.ok || !r.data?.ok) {
+    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--red);padding:14px;">${esc(r.data?.error || 'Failed to load defaults')}</td></tr>`;
+    return;
+  }
+  requiredGroupDefaultsDraft = Array.isArray(r.data.data) ? r.data.data.map((row) => ({
+    ay_category_id: Number(row.ay_category_id || 0),
+    ay_group_id: Number(row.ay_group_id || 0),
+    ay_group_name: String(row.ay_group_name || ''),
+    default_ay_id: Number(row.default_ay_id || 0),
+    default_label: String(row.default_label || ''),
+  })) : [];
+  renderRequiredGroupDefaults();
+}
+
+function renderRequiredGroupDefaults() {
+  const tbody = document.getElementById('req-defaults-body');
+  if (!tbody) return;
+  if (!requiredGroupDefaultsDraft.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);padding:14px;text-align:center;">No defaults yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = requiredGroupDefaultsDraft.map((row, idx) => `
+    <tr>
+      <td><input class="fi req-defaults-input" data-idx="${idx}" data-key="ay_category_id" type="number" value="${Number(row.ay_category_id || 0)}"></td>
+      <td><input class="fi req-defaults-input" data-idx="${idx}" data-key="ay_group_id" type="number" value="${Number(row.ay_group_id || 0)}"></td>
+      <td><input class="fi req-defaults-input" data-idx="${idx}" data-key="ay_group_name" value="${esc(row.ay_group_name || '')}"></td>
+      <td><input class="fi req-defaults-input" data-idx="${idx}" data-key="default_ay_id" type="number" value="${Number(row.default_ay_id || 0)}"></td>
+      <td><input class="fi req-defaults-input" data-idx="${idx}" data-key="default_label" value="${esc(row.default_label || '')}"></td>
+    </tr>
+  `).join('');
+  tbody.querySelectorAll('.req-defaults-input').forEach((input) => {
+    input.addEventListener('input', (event) => {
+      const t = event.target;
+      const idx = Number(t.dataset.idx || 0);
+      const key = String(t.dataset.key || '');
+      if (!requiredGroupDefaultsDraft[idx] || !key) return;
+      const numKeys = ['ay_category_id', 'ay_group_id', 'default_ay_id'];
+      requiredGroupDefaultsDraft[idx][key] = numKeys.includes(key) ? Number(t.value || 0) : String(t.value || '');
+    });
+  });
+}
+
 function wireAttributesPage() {
   document.getElementById('attr-search').addEventListener('input', renderAttributeMappings);
   document.getElementById('attr-type-filter').addEventListener('change', renderAttributeMappings);
   document.getElementById('attr-refresh').addEventListener('click', loadAttributeMappings);
+  document.getElementById('req-defaults-refresh').addEventListener('click', () => loadRequiredGroupDefaults());
+  document.getElementById('req-defaults-category-id').addEventListener('change', () => loadRequiredGroupDefaults());
+  document.getElementById('req-defaults-add-row').addEventListener('click', () => {
+    const fallbackCategory = Number(document.getElementById('req-defaults-category-id')?.value || document.getElementById('attr-category-id')?.value || 0);
+    requiredGroupDefaultsDraft.push({
+      ay_category_id: fallbackCategory > 0 ? fallbackCategory : 0,
+      ay_group_id: 0,
+      ay_group_name: '',
+      default_ay_id: 0,
+      default_label: '',
+    });
+    renderRequiredGroupDefaults();
+  });
+  document.getElementById('req-defaults-save').addEventListener('click', async () => {
+    const result = document.getElementById('req-defaults-result');
+    const payload = requiredGroupDefaultsDraft
+      .filter((row) => Number(row.ay_group_id || 0) > 0 && Number(row.default_ay_id || 0) > 0)
+      .map((row) => ({
+        ay_category_id: Number(row.ay_category_id || 0),
+        ay_group_id: Number(row.ay_group_id || 0),
+        ay_group_name: String(row.ay_group_name || ''),
+        default_ay_id: Number(row.default_ay_id || 0),
+        default_label: String(row.default_label || ''),
+      }));
+    if (result) {
+      result.textContent = 'Saving...';
+      result.style.color = 'var(--muted)';
+    }
+    const r = await api('required_group_defaults_save', { defaults: payload });
+    if (!r.ok || !r.data?.ok) {
+      if (result) {
+        result.textContent = r.data?.error || 'Save failed';
+        result.style.color = 'var(--red)';
+      }
+      toast('Required defaults save failed', 'err');
+      return;
+    }
+    if (result) {
+      result.textContent = `Saved ${Number(r.data.data?.saved || 0)} defaults`;
+      result.style.color = 'var(--green)';
+    }
+    toast('Required group defaults saved', 'ok');
+    await loadRequiredGroupDefaults();
+  });
   document.getElementById('attr-save').addEventListener('click', async () => {
     const el = document.getElementById('attr-save-result');
     el.textContent = 'Saving...';
@@ -119,4 +220,18 @@ function wireAttributesPage() {
       toast('Attribute mapping save failed', 'err');
     }
   });
+}
+
+function openRequiredGroupDefaults(ayCategoryId = 0) {
+  goto('attributes');
+  const categoryId = Number(ayCategoryId || 0);
+  const attrInput = document.getElementById('attr-category-id');
+  const defaultsInput = document.getElementById('req-defaults-category-id');
+  if (attrInput && categoryId > 0) {
+    attrInput.value = String(categoryId);
+  }
+  if (defaultsInput && categoryId > 0) {
+    defaultsInput.value = String(categoryId);
+  }
+  loadRequiredGroupDefaults(categoryId > 0 ? categoryId : null);
 }

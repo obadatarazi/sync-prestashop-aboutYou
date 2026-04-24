@@ -36,6 +36,7 @@ use SyncBridge\Services\SyncRunner;
 use SyncBridge\Support\AttributeTypeGuesser;
 use SyncBridge\Support\HttpClient;
 use SyncBridge\Support\AyDocsPolicy;
+use SyncBridge\Support\ImageNormalizer;
 use SyncBridge\Database\SyncMetricsRepository;
 
 require_once __DIR__ . '/../src/bootstrap.php';
@@ -267,6 +268,10 @@ if ($action === 'status') {
         'sync_pid'    => $syncPid > 0 ? $syncPid : null,
         'recent_runs' => $runs->getRecent(5),
         'policy_warnings' => $policyWarnings,
+        'connections' => [
+            'ps_configured' => trim((string) ($_ENV['PS_BASE_URL'] ?? '')) !== '' && trim((string) ($_ENV['PS_API_KEY'] ?? '')) !== '',
+            'ay_configured' => trim((string) ($_ENV['AY_BASE_URL'] ?? '')) !== '' && trim((string) ($_ENV['AY_API_KEY'] ?? '')) !== '',
+        ],
     ]]);
 }
 
@@ -920,6 +925,86 @@ if ($action === 'images') {
     ]]);
 }
 
+if ($action === 'image_retry_failed') {
+    require_csrf($input);
+    $psId = (int) ($input['ps_id'] ?? 0);
+    if ($psId <= 0) {
+        json_out(400, ['ok' => false, 'error' => 'ps_id required']);
+    }
+
+    $repo = new ProductRepository();
+    $product = $repo->findByPsId($psId);
+    if (!$product) {
+        json_out(404, ['ok' => false, 'error' => 'Product not found']);
+    }
+    $productId = (int) ($product['id'] ?? 0);
+    if ($productId <= 0) {
+        json_out(404, ['ok' => false, 'error' => 'Product not found']);
+    }
+
+    $failedImages = Database::fetchAll(
+        "SELECT id, source_url FROM product_images WHERE product_id = ? AND status = 'error' ORDER BY position ASC, id ASC",
+        [$productId]
+    );
+    if ($failedImages === []) {
+        json_out(200, ['ok' => true, 'data' => ['retried' => 0, 'ok' => 0, 'failed' => 0]]);
+    }
+
+    $baseUrl = rtrim((string) ($_ENV['IMAGE_PUBLIC_BASE_URL'] ?? ''), '/');
+    if ($baseUrl === '') {
+        $appUrl = rtrim((string) ($_ENV['APP_URL'] ?? ''), '/');
+        if ($appUrl !== '') {
+            $baseUrl = $appUrl . '/ay-normalized';
+        }
+    }
+    if ($baseUrl === '') {
+        json_out(422, ['ok' => false, 'error' => 'Image public base URL is not configured']);
+    }
+
+    $http = new HttpClient(
+        (int) ($_ENV['PS_HTTP_TIMEOUT'] ?? 15),
+        (int) ($_ENV['PS_HTTP_CONNECT_TIMEOUT'] ?? 8),
+    );
+    $normalizer = new ImageNormalizer(
+        $http,
+        __DIR__ . '/ay-normalized',
+        $baseUrl,
+        1125,
+        1500,
+        (int) ($_ENV['IMAGE_JPEG_QUALITY'] ?? 92)
+    );
+
+    $ok = 0;
+    $failed = 0;
+    foreach ($failedImages as $img) {
+        $imgId = (int) ($img['id'] ?? 0);
+        $url = trim((string) ($img['source_url'] ?? ''));
+        if ($imgId <= 0 || $url === '') {
+            continue;
+        }
+        try {
+            $result = $normalizer->normalizeSingleUrl($url);
+            if ($result !== null) {
+                [$localPath, $publicUrl, $w, $h, $bytes] = $result;
+                $repo->markImageOk($imgId, $localPath, $publicUrl, (int) $w, (int) $h, (int) $bytes);
+                $ok++;
+            } else {
+                $repo->markImageError($imgId, 'Normalization retry failed');
+                $failed++;
+            }
+        } catch (\Throwable $e) {
+            $repo->markImageError($imgId, 'Normalization retry failed: ' . mb_substr($e->getMessage(), 0, 180));
+            $failed++;
+        }
+    }
+
+    json_out(200, ['ok' => true, 'data' => [
+        'retried' => count($failedImages),
+        'ok' => $ok,
+        'failed' => $failed,
+    ]]);
+}
+
 // ----------------------------------------------------------------
 // SETTINGS
 // ----------------------------------------------------------------
@@ -1073,6 +1158,7 @@ if ($action === 'category_products_suggest_mappings') {
 
     $cache = [];
     $suggestions = [];
+    $policy = new AyDocsPolicy();
     foreach ($products as $product) {
         $name = trim((string) ($product['name'] ?? ''));
         $desc = trim((string) ($product['description_short'] ?? $product['description'] ?? ''));
@@ -1118,22 +1204,151 @@ if ($action === 'category_products_suggest_mappings') {
             }
         }
 
+        $suggested = is_array($best) ? [
+            'id' => (int) ($best['id'] ?? 0),
+            'path' => (string) ($best['path'] ?? $best['name'] ?? ''),
+        ] : null;
+        $riskLevel = $confidence >= 0.75 ? 'low' : ($confidence >= 0.5 ? 'medium' : 'high');
+        $warnings = [];
+        if ($suggested !== null && $type !== '') {
+            $path = strtolower((string) ($suggested['path'] ?? ''));
+            if (!str_contains($path, strtolower($type))) {
+                $warnings[] = 'Suggested path does not strongly match inferred product type';
+            }
+        }
+        if ($gender !== '' && $suggested !== null) {
+            $path = strtolower((string) ($suggested['path'] ?? ''));
+            if (!preg_match('/(^|[|\/\s_-])' . preg_quote($gender, '/') . '([|\/\s_-]|$)/i', $path)) {
+                $warnings[] = 'Gender mismatch between product text and suggested category path';
+            }
+        }
+        if ($suggested !== null) {
+            $recommendedStockInterval = $policy->minIntervalMsForPath('/products/stocks', 650);
+            $configuredInterval = (int) ($_ENV['AY_MIN_INTERVAL_MS'] ?? 650);
+            if ($configuredInterval < $recommendedStockInterval) {
+                $warnings[] = 'AY_MIN_INTERVAL_MS below docs-policy recommendation';
+            }
+        }
+
         $suggestions[] = [
             'ps_id' => (int) ($product['ps_id'] ?? 0),
-            'suggested' => is_array($best) ? [
-                'id' => (int) ($best['id'] ?? 0),
-                'path' => (string) ($best['path'] ?? $best['name'] ?? ''),
-            ] : null,
+            'suggested' => $suggested,
             'reason' => trim(implode(' · ', array_filter([
                 $gender !== '' ? 'gender=' . $gender : 'gender=unknown',
                 $type !== '' ? 'type=' . $type : 'type=generic',
                 'query=' . $query,
             ]))),
             'confidence' => round($confidence, 2),
+            'risk_level' => $riskLevel,
+            'policy_warnings' => $warnings,
         ];
     }
 
     json_out(200, ['ok' => true, 'data' => ['rows' => $suggestions]]);
+}
+
+if ($action === 'category_mapping_validate') {
+    $psCategoryId = (int) ($input['ps_category_id'] ?? 0);
+    $ayCategoryId = (int) ($input['ay_category_id'] ?? 0);
+    if ($psCategoryId <= 0 || $ayCategoryId <= 0) {
+        json_out(400, ['ok' => false, 'error' => 'ps_category_id and ay_category_id are required']);
+    }
+
+    try {
+        $http = new HttpClient(
+            (int) ($_ENV['AY_HTTP_TIMEOUT'] ?? 15),
+            (int) ($_ENV['AY_HTTP_CONNECT_TIMEOUT'] ?? 8),
+        );
+        $ay = new AboutYouClient($http);
+        $policy = new AyDocsPolicy();
+        $metadata = $ay->getRequiredCategoryMetadata($ayCategoryId);
+        $requiredGroups = (array) ($metadata['required_groups'] ?? []);
+        $requiredTextFields = (array) ($metadata['required_text_fields'] ?? []);
+
+        $products = Database::fetchAll(
+            "SELECT ps_id, name, description_short, description
+             FROM products
+             WHERE category_ps_id = ?
+             ORDER BY ps_id ASC
+             LIMIT 200",
+            [$psCategoryId]
+        );
+        $sample = array_slice($products, 0, 25);
+        $missingDescriptionCount = 0;
+        foreach ($sample as $row) {
+            $text = trim((string) ($row['description_short'] ?? $row['description'] ?? ''));
+            if ($text === '') {
+                $missingDescriptionCount++;
+            }
+        }
+
+        $warnings = [];
+        $quickFixes = [];
+        if ($requiredGroups === []) {
+            $warnings[] = 'No required attribute groups detected for target AY category';
+        }
+        if ($requiredTextFields !== []) {
+            $warnings[] = 'Target AY category requires text fields: ' . implode(', ', $requiredTextFields);
+        }
+        if ($missingDescriptionCount > 0) {
+            $warnings[] = sprintf('%d/%d sampled products have empty description text', $missingDescriptionCount, max(1, count($sample)));
+        }
+        $defaultsCount = (int) Database::fetchValue(
+            "SELECT COUNT(*) FROM ay_required_group_defaults WHERE ay_group_id > 0 AND (ay_category_id = ? OR ay_category_id = 0)",
+            [$ayCategoryId]
+        );
+        $requiredGroupsCount = count($requiredGroups);
+        $groupCompletenessScore = $requiredGroupsCount > 0
+            ? (int) round(min(100, ($defaultsCount / $requiredGroupsCount) * 100))
+            : 100;
+        if ($requiredGroupsCount > 0 && $defaultsCount < $requiredGroupsCount) {
+            $warnings[] = sprintf(
+                'Required group defaults incomplete (%d/%d configured)',
+                $defaultsCount,
+                $requiredGroupsCount
+            );
+            $quickFixes[] = 'Add missing defaults in Required Group Defaults for AY category ' . $ayCategoryId;
+            $quickFixes[] = 'Map missing attribute_required values in Attribute Mapping before bulk sync';
+        }
+        if ($missingDescriptionCount > 0) {
+            $quickFixes[] = 'Populate export_description for products with empty descriptions';
+        }
+        $recommendedStockInterval = $policy->minIntervalMsForPath('/products/stocks', 650);
+        $configuredInterval = (int) ($_ENV['AY_MIN_INTERVAL_MS'] ?? 650);
+        if ($configuredInterval < $recommendedStockInterval) {
+            $warnings[] = sprintf(
+                'AY_MIN_INTERVAL_MS (%d) is below recommended policy (%d)',
+                $configuredInterval,
+                $recommendedStockInterval
+            );
+        }
+
+        $riskScore = 0;
+        $riskScore += $requiredGroups === [] ? 15 : 0;
+        if ($requiredGroupsCount > 0 && $groupCompletenessScore < 100) {
+            $riskScore += (int) round((100 - $groupCompletenessScore) * 0.35);
+        }
+        $riskScore += $missingDescriptionCount > 0 ? min(35, $missingDescriptionCount * 2) : 0;
+        $riskScore += $configuredInterval < $recommendedStockInterval ? 20 : 0;
+        $riskLevel = $riskScore >= 45 ? 'high' : ($riskScore >= 20 ? 'medium' : 'low');
+
+        json_out(200, ['ok' => true, 'data' => [
+            'ps_category_id' => $psCategoryId,
+            'ay_category_id' => $ayCategoryId,
+            'required_groups_count' => $requiredGroupsCount,
+            'required_text_fields' => $requiredTextFields,
+            'group_defaults_count' => $defaultsCount,
+            'group_completeness_score' => $groupCompletenessScore,
+            'sample_products' => count($sample),
+            'missing_description_count' => $missingDescriptionCount,
+            'risk_score' => $riskScore,
+            'risk_level' => $riskLevel,
+            'warnings' => $warnings,
+            'quick_fixes' => array_values(array_unique($quickFixes)),
+        ]]);
+    } catch (\Throwable $e) {
+        json_out(500, ['ok' => false, 'error' => $e->getMessage()]);
+    }
 }
 
 if ($action === 'ay_categories_search') {

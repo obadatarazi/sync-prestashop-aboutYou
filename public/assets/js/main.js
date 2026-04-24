@@ -20,6 +20,7 @@ wireOrdersPage();
 wireImagesPage();
 wireLogsPage();
 wireSyncPage();
+wireDashboardPage();
 wireSettingsPage();
 wireMappingsPage();
 wireAttributesPage();

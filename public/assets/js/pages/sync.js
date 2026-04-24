@@ -75,11 +75,19 @@ async function loadRuns() {
   if (!r.ok || !r.data.ok) return;
   const tbody = document.getElementById('runs-body');
   const runs = r.data.data;
+  const commandFilter = String(document.getElementById('run-filter-command')?.value || '').trim();
+  const statusFilter = String(document.getElementById('run-filter-status')?.value || '').trim();
+  const filteredRuns = runs.filter((run) => {
+    if (commandFilter && String(run.command || '') !== commandFilter) return false;
+    if (statusFilter && String(run.status || '') !== statusFilter) return false;
+    return true;
+  });
   const runningRunIds = runs
     .filter(run => run.status === 'running')
     .map(run => String(run.run_id || ''));
   selectedRunIds = selectedRunIds.filter(id => runningRunIds.includes(id));
-  tbody.innerHTML = runs.map(run => `
+  updateSelectedRunCount();
+  tbody.innerHTML = filteredRuns.map(run => `
     <tr>
       <td><input type="checkbox" name="selected-run" value="${esc(run.run_id || '')}" ${selectedRunIds.includes(String(run.run_id || '')) ? 'checked' : ''} ${run.status === 'running' ? '' : 'disabled'}></td>
       <td class="mono">${esc((run.run_id||'').slice(0,8))}</td>
@@ -100,6 +108,7 @@ async function loadRuns() {
       } else {
         selectedRunIds = selectedRunIds.filter(v => v !== id);
       }
+      updateSelectedRunCount();
     });
   });
 }
@@ -118,4 +127,13 @@ function addSyncLog(text) {
 function wireSyncPage() {
   document.getElementById('refresh-job').addEventListener('click', loadDashboard);
   document.getElementById('stop-sync-btn').addEventListener('click', stopSync);
+  document.getElementById('run-filter-command')?.addEventListener('change', loadRuns);
+  document.getElementById('run-filter-status')?.addEventListener('change', loadRuns);
+}
+
+function updateSelectedRunCount() {
+  const el = document.getElementById('run-selected-count');
+  if (!el) return;
+  el.textContent = `${selectedRunIds.length} selected`;
+  el.className = `badge ${selectedRunIds.length ? 'b-warn' : 'b-gray'}`;
 }

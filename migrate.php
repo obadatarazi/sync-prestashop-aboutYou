@@ -286,6 +286,11 @@ function applyPostSchemaAdjustments(PDO $pdo): void {
     }
 
     ensureIndex($pdo, 'order_items', 'uq_order_item', 'ALTER TABLE order_items ADD UNIQUE KEY uq_order_item (order_id, ay_order_item_id)');
+    ensureIndex($pdo, 'order_items', 'idx_order_item_sku', 'ALTER TABLE order_items ADD INDEX idx_order_item_sku (sku)');
+    ensureIndex($pdo, 'order_items', 'idx_order_item_ean13', 'ALTER TABLE order_items ADD INDEX idx_order_item_ean13 (ean13)');
+    ensureIndex($pdo, 'orders', 'idx_ay_status', 'ALTER TABLE orders ADD INDEX idx_ay_status (ay_status)');
+    ensureIndex($pdo, 'orders', 'idx_ay_created', 'ALTER TABLE orders ADD INDEX idx_ay_created (ay_created_at)');
+    ensureIndex($pdo, 'sync_logs', 'idx_run_created', 'ALTER TABLE sync_logs ADD INDEX idx_run_created (run_id, created_at)');
     try {
         $pdo->exec("ALTER TABLE attribute_maps MODIFY ay_group_id INT UNSIGNED NOT NULL DEFAULT 0");
     } catch (PDOException $e) {
@@ -325,6 +330,7 @@ function applyPostSchemaAdjustments(PDO $pdo): void {
         ['ay_country_codes', 'DE', 'string', 'Country Codes CSV', 'aboutyou'],
         ['ay_batch_poll_attempts', '10', 'integer', 'Batch Poll Attempts', 'aboutyou'],
         ['ay_batch_poll_ms', '1500', 'integer', 'Batch Poll Interval (ms)', 'aboutyou'],
+        ['ay_min_interval_ms', '700', 'integer', 'AY Min Interval (ms)', 'aboutyou'],
         ['feature_ay_adaptive_throttle', 'true', 'boolean', 'Feature: AY adaptive throttle', 'features'],
         ['feature_idempotent_status_push', 'true', 'boolean', 'Feature: idempotent status push', 'features'],
         ['feature_sync_metrics', 'true', 'boolean', 'Feature: sync metrics storage', 'features'],

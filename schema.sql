@@ -417,6 +417,7 @@ INSERT IGNORE INTO settings (`key`, `value`, `type`, label, group_name) VALUES
 ('ay_country_codes',          'DE',    'string',  'Country Codes CSV',          'aboutyou'),
 ('ay_batch_poll_attempts',    '10',    'integer', 'Batch Poll Attempts',        'aboutyou'),
 ('ay_batch_poll_ms',          '1500',  'integer', 'Batch Poll Interval (ms)',   'aboutyou'),
+('ay_min_interval_ms',        '700',   'integer', 'AY Min Interval (ms)',        'aboutyou'),
 ('feature_ay_adaptive_throttle','true','boolean','Feature: AY adaptive throttle','features'),
 ('feature_idempotent_status_push','true','boolean','Feature: idempotent status push','features'),
 ('feature_sync_metrics','true','boolean','Feature: sync metrics storage','features');

@@ -42,7 +42,8 @@ function renderCategoryMappings() {
       </td>
       <td>
         ${current
-          ? `<div style="font-size:12.5px;color:var(--text);">${esc(current.path || current.id)}</div><div class="mono">AY#${esc(current.id)}</div>`
+          ? `<div style="font-size:12.5px;color:var(--text);">${esc(current.path || current.id)}</div><div class="mono">AY#${esc(current.id)}</div>
+             <div style="margin-top:4px;"><span class="badge b-info">Ready to validate</span></div>`
           : '<span class="badge b-err">Not mapped</span>'}
       </td>
       <td>
@@ -96,6 +97,66 @@ async function searchAyCategories(psCategoryId) {
   });
 }
 
+async function validateSelectedCategoryMapping() {
+  const resultEl = document.getElementById('map-validation-result');
+  if (!resultEl) return;
+  const entries = Object.entries(categoryMappingsDraft || {});
+  if (!entries.length) {
+    resultEl.textContent = 'Save or select at least one mapping first.';
+    resultEl.style.color = 'var(--amber)';
+    return;
+  }
+  // Validate the most recently edited mapping as "selected".
+  const [psCategoryId, mapping] = entries[entries.length - 1];
+  const ayCategoryId = Number(mapping?.id || 0);
+  if (!ayCategoryId) {
+    resultEl.textContent = 'Selected mapping has no AY category id.';
+    resultEl.style.color = 'var(--red)';
+    return;
+  }
+  resultEl.textContent = 'Validating mapping...';
+  resultEl.style.color = 'var(--muted)';
+  const r = await api('category_mapping_validate', {
+    ps_category_id: Number(psCategoryId),
+    ay_category_id: ayCategoryId,
+  });
+  if (!r.ok || !r.data?.ok) {
+    resultEl.textContent = r.data?.error || 'Validation failed';
+    resultEl.style.color = 'var(--red)';
+    return;
+  }
+  const d = r.data.data || {};
+  const warnings = Array.isArray(d.warnings) ? d.warnings : [];
+  const quickFixes = Array.isArray(d.quick_fixes) ? d.quick_fixes : [];
+  const badgeClass = d.risk_level === 'high' ? 'b-err' : d.risk_level === 'medium' ? 'b-warn' : 'b-ok';
+  const groupScore = Number(d.group_completeness_score || 0);
+  const ayCategoryIdNum = Number(d.ay_category_id || 0);
+  resultEl.innerHTML = `
+    <span class="badge ${badgeClass}" style="margin-right:6px;">Risk: ${esc(String(d.risk_level || 'low'))}</span>
+    score=${Number(d.risk_score || 0)} · required_groups=${Number(d.required_groups_count || 0)} · defaults=${Number(d.group_defaults_count || 0)} · sampled=${Number(d.sample_products || 0)}
+    <div style="margin-top:8px;">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:4px;">
+        <span>Product-group completeness</span>
+        <span>${groupScore}%</span>
+      </div>
+      <div class="pb"><div class="pbf ${groupScore >= 90 ? 'g' : (groupScore >= 60 ? 'a' : 'b')}" style="width:${Math.max(0, Math.min(100, groupScore))}%"></div></div>
+    </div>
+    ${warnings.length ? `<div style="margin-top:6px;color:var(--amber)">• ${warnings.map(w => esc(String(w))).join('<br>• ')}</div>` : ''}
+    ${quickFixes.length ? `<div style="margin-top:7px;color:var(--text)"><strong>Quick fixes:</strong><br>• ${quickFixes.map(x => esc(String(x))).join('<br>• ')}</div>` : ''}
+    ${ayCategoryIdNum > 0 ? `<div style="margin-top:8px;"><button class="btn btn-sm" id="map-open-required-defaults">Open Required Group Defaults (AY#${ayCategoryIdNum})</button></div>` : ''}
+  `;
+  resultEl.style.color = 'var(--muted)';
+  if (ayCategoryIdNum > 0) {
+    document.getElementById('map-open-required-defaults')?.addEventListener('click', () => {
+      if (typeof openRequiredGroupDefaults === 'function') {
+        openRequiredGroupDefaults(ayCategoryIdNum);
+      } else {
+        goto('attributes');
+      }
+    });
+  }
+}
+
 async function showCategoryProducts(psCategoryId) {
   const modal = document.getElementById('category-products-modal');
   const title = document.getElementById('category-products-title');
@@ -144,6 +205,12 @@ function renderCategoryProductsList() {
   }
   list.innerHTML = rows.map(item => {
     const suggestion = currentCategorySuggestionsByPsId[String(item.ps_id)] || null;
+    const riskLevel = String(suggestion?.risk_level || '').toLowerCase();
+    const riskBadge = riskLevel
+      ? `<span class="badge ${riskLevel === 'high' ? 'b-err' : (riskLevel === 'medium' ? 'b-warn' : 'b-ok')}">Risk: ${esc(riskLevel)}</span>`
+      : '';
+    const warnings = Array.isArray(suggestion?.policy_warnings) ? suggestion.policy_warnings.slice(0, 2) : [];
+    const suggestionCategoryName = String(suggestion?.suggested?.path || '').trim();
     const suggestionLabel = suggestion?.suggested?.id
       ? `Suggested AY#${suggestion.suggested.id}${suggestion.confidence ? ` (${Math.round(Number(suggestion.confidence || 0) * 100)}%)` : ''}`
       : 'No suggestion';
@@ -156,6 +223,8 @@ function renderCategoryProductsList() {
           <div class="mono">PS#${esc(item.ps_id)} · ${esc(item.reference || '—')} · ${esc(item.sync_status || 'pending')}</div>
           <div style="font-size:11.5px;color:var(--muted);margin-top:2px;">${esc((item.description_short || item.description || '').slice(0, 120) || 'No description')}</div>
           <div style="font-size:11.5px;color:${suggestion?.suggested?.id ? 'var(--green)' : 'var(--muted)'};margin-top:2px;">${esc(suggestionLabel)}</div>
+          ${suggestion?.suggested?.id && suggestionCategoryName ? `<div style="font-size:11.5px;color:var(--muted);margin-top:2px;">${esc(suggestionCategoryName)}</div>` : ''}
+          ${(riskBadge || warnings.length) ? `<div style="margin-top:5px;display:flex;gap:5px;align-items:center;flex-wrap:wrap;">${riskBadge}${warnings.map((w) => `<span class="badge b-warn">${esc(String(w))}</span>`).join('')}</div>` : ''}
         </div>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
@@ -302,6 +371,7 @@ function wireMappingsPage() {
     toast('Gender path filter applied to next AY searches', 'info');
   });
   document.getElementById('map-refresh').addEventListener('click', loadCategoryMappings);
+  document.getElementById('map-validate-selected').addEventListener('click', validateSelectedCategoryMapping);
   document.getElementById('category-products-close').addEventListener('click', closeCategoryProductsModal);
   document.getElementById('category-products-assign-btn').addEventListener('click', assignAyCategoryToCurrentCategoryProducts);
   document.getElementById('category-products-suggest-btn').addEventListener('click', suggestCategoryMappingsForCurrentCategoryProducts);

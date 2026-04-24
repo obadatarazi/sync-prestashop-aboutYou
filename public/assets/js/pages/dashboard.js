@@ -5,6 +5,7 @@ async function loadDashboard() {
   if (!r.ok || !r.data.ok) return;
   const d = r.data.data;
   syncPid = Number(d.sync_pid || 0);
+  updateTopbarHealth(d);
 
   // Stats
   const pStats = d.products || {};
@@ -45,6 +46,7 @@ async function loadDashboard() {
     </div>`;
 
   renderCurrentJob(d.current_run);
+  renderPolicyWarnings(d.policy_warnings || []);
 
   // Recent logs
   const lr = await api('logs', { limit: 30 });
@@ -60,6 +62,9 @@ async function loadDashboard() {
     }).join('');
     el.scrollTop = el.scrollHeight;
   }
+
+  await loadMetricsSummary();
+  await loadPolicySnapshot();
 }
 
 function renderCurrentJob(run) {
@@ -114,4 +119,154 @@ function startJobPoll() {
       await loadRuns();
     }
   }, intervalSec * 1000);
+}
+
+function renderPolicyWarnings(warnings) {
+  const el = document.getElementById('system-warnings');
+  if (!el) return;
+  if (!Array.isArray(warnings) || !warnings.length) {
+    el.innerHTML = '<span style="color:var(--green)">No policy warnings detected.</span>';
+    return;
+  }
+  el.innerHTML = warnings.map(w => `<div style="margin-bottom:6px;color:var(--amber)">• ${esc(String(w))}</div>`).join('');
+}
+
+async function loadMetricsSummary() {
+  const el = document.getElementById('metrics-summary');
+  if (!el) return;
+  const r = await api('metrics', { limit: 250 });
+  if (!r.ok || !r.data?.ok) {
+    el.textContent = 'Metrics unavailable.';
+    return;
+  }
+  const rows = Array.isArray(r.data.data) ? r.data.data : [];
+  if (!rows.length) {
+    el.textContent = 'No metrics captured yet.';
+    return;
+  }
+  const elapsed = rows.filter(x => x.metric_key === 'elapsed_sec').map(x => Number(x.metric_value || 0)).filter(x => x > 0);
+  const failed = rows.filter(x => x.metric_key === 'failed').map(x => Number(x.metric_value || 0));
+  const pushed = rows.filter(x => x.metric_key === 'pushed').map(x => Number(x.metric_value || 0));
+  const avgElapsed = elapsed.length ? (elapsed.reduce((a, b) => a + b, 0) / elapsed.length) : 0;
+  const totalFailed = failed.reduce((a, b) => a + b, 0);
+  const totalPushed = pushed.reduce((a, b) => a + b, 0);
+  const successRatio = totalPushed + totalFailed > 0 ? Math.round((totalPushed / (totalPushed + totalFailed)) * 100) : 100;
+  const sortedElapsed = elapsed.slice().sort((a, b) => a - b);
+  const p95 = sortedElapsed.length ? sortedElapsed[Math.min(sortedElapsed.length - 1, Math.floor(sortedElapsed.length * 0.95))] : 0;
+  const sparklineSvg = buildRuntimeSparkline(elapsed.slice(-24));
+  el.innerHTML = `
+    <div style="margin-bottom:8px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+        <span style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;">Runtime trend (last 24)</span>
+        <span style="font-size:11px;color:var(--muted);">${elapsed.length} samples</span>
+      </div>
+      ${sparklineSvg}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;">
+      <div style="padding:8px;background:var(--surface2);border-radius:7px;"><div style="font-size:10px;color:var(--muted)">Avg runtime</div><div style="font-weight:600">${avgElapsed.toFixed(2)}s</div></div>
+      <div style="padding:8px;background:var(--surface2);border-radius:7px;"><div style="font-size:10px;color:var(--muted)">P95 runtime</div><div style="font-weight:600">${p95.toFixed(2)}s</div></div>
+      <div style="padding:8px;background:var(--surface2);border-radius:7px;"><div style="font-size:10px;color:var(--muted)">Total pushed</div><div style="font-weight:600;color:var(--green)">${totalPushed}</div></div>
+      <div style="padding:8px;background:var(--surface2);border-radius:7px;"><div style="font-size:10px;color:var(--muted)">Total failed</div><div style="font-weight:600;color:var(--red)">${totalFailed}</div></div>
+      <div style="padding:8px;background:var(--surface2);border-radius:7px;"><div style="font-size:10px;color:var(--muted)">Success ratio</div><div style="font-weight:600;color:${successRatio >= 90 ? 'var(--green)' : (successRatio >= 75 ? 'var(--amber)' : 'var(--red)')}">${successRatio}%</div></div>
+    </div>`;
+}
+
+async function loadPolicySnapshot() {
+  const el = document.getElementById('policy-snapshot');
+  if (!el) return;
+  const r = await api('policy_snapshot', {});
+  if (!r.ok || !r.data?.ok) {
+    el.textContent = 'Policy snapshot unavailable.';
+    return;
+  }
+  const row = r.data.data;
+  if (!row) {
+    el.textContent = 'No snapshot yet.';
+    return;
+  }
+  let generatedAt = '—';
+  try {
+    const payload = typeof row.payload_json === 'string' ? JSON.parse(row.payload_json) : row.payload_json;
+    generatedAt = payload?.generated_at || '—';
+  } catch (_) {}
+  el.innerHTML = `
+    <div><strong>Source:</strong> ${esc(row.source || 'mcp_docs')}</div>
+    <div><strong>Saved:</strong> ${esc(String(row.created_at || '—'))}</div>
+    <div><strong>Generated:</strong> ${esc(String(generatedAt))}</div>`;
+}
+
+async function refreshPolicySnapshot() {
+  const r = await api('policy_snapshot_refresh', {});
+  if (!r.ok || !r.data?.ok) {
+    toast(r.data?.error || 'Policy snapshot refresh failed', 'err');
+    return;
+  }
+  toast('Policy snapshot refreshed', 'ok');
+  await loadPolicySnapshot();
+}
+
+function wireDashboardPage() {
+  document.getElementById('refresh-warnings')?.addEventListener('click', loadDashboard);
+  document.getElementById('refresh-metrics')?.addEventListener('click', loadMetricsSummary);
+  document.getElementById('refresh-policy-snapshot')?.addEventListener('click', refreshPolicySnapshot);
+}
+
+function updateTopbarHealth(statusData) {
+  const ps = document.getElementById('tb-ps');
+  const ay = document.getElementById('tb-ay');
+  const mode = document.getElementById('tb-mode');
+  const connections = statusData?.connections || {};
+  if (ps) {
+    const ok = !!connections.ps_configured;
+    ps.className = `badge ${ok ? 'b-ok' : 'b-err'}`;
+    ps.textContent = ok ? '● PS Ready' : '● PS Missing Config';
+  }
+  if (ay) {
+    const ok = !!connections.ay_configured;
+    ay.className = `badge ${ok ? 'b-ok' : 'b-err'}`;
+    ay.textContent = ok ? '● AY Ready' : '● AY Missing Config';
+  }
+  if (mode) {
+    const running = !!statusData?.current_run;
+    mode.className = `badge ${running ? 'b-warn' : 'b-gray'}`;
+    mode.textContent = running ? 'RUNNING' : 'LIVE';
+  }
+}
+
+function buildRuntimeSparkline(values) {
+  const points = values.filter((v) => Number.isFinite(v) && v >= 0);
+  if (!points.length) {
+    return '<div style="height:46px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;">No runtime data yet</div>';
+  }
+  if (points.length === 1) {
+    const one = points[0].toFixed(2);
+    return `<div style="height:46px;display:flex;align-items:center;justify-content:center;color:var(--text);font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;">${one}s</div>`;
+  }
+  const width = 360;
+  const height = 46;
+  const padX = 4;
+  const padY = 4;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const range = Math.max(0.001, max - min);
+  const step = (width - padX * 2) / (points.length - 1);
+  const coords = points.map((value, idx) => {
+    const x = padX + idx * step;
+    const y = height - padY - ((value - min) / range) * (height - padY * 2);
+    return [x, y];
+  });
+  const path = coords.map((xy, idx) => `${idx === 0 ? 'M' : 'L'}${xy[0].toFixed(2)},${xy[1].toFixed(2)}`).join(' ');
+  const area = `M${coords[0][0].toFixed(2)},${(height - padY).toFixed(2)} ${coords.map((xy) => `L${xy[0].toFixed(2)},${xy[1].toFixed(2)}`).join(' ')} L${coords[coords.length - 1][0].toFixed(2)},${(height - padY).toFixed(2)} Z`;
+  const latest = points[points.length - 1].toFixed(2);
+  const minLabel = min.toFixed(2);
+  const maxLabel = max.toFixed(2);
+  return `
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" preserveAspectRatio="none" style="display:block;background:var(--surface2);border:1px solid var(--border);border-radius:7px;">
+      <path d="${area}" fill="rgba(59,99,230,.12)"></path>
+      <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2"></path>
+      <circle cx="${coords[coords.length - 1][0].toFixed(2)}" cy="${coords[coords.length - 1][1].toFixed(2)}" r="2.5" fill="var(--accent2)"></circle>
+      <text x="6" y="12" font-size="10" fill="var(--muted)">min ${minLabel}s</text>
+      <text x="${(width - 90).toFixed(0)}" y="12" font-size="10" fill="var(--muted)">max ${maxLabel}s</text>
+      <text x="${(width - 80).toFixed(0)}" y="${(height - 6).toFixed(0)}" font-size="10" fill="var(--text)">latest ${latest}s</text>
+    </svg>`;
 }

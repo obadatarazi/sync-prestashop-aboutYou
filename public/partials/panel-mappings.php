@@ -14,8 +14,10 @@
       </select>
       <button class="btn btn-sm" id="map-refresh">Refresh</button>
       <button class="btn btn-p btn-sm" id="map-save">Save Mappings</button>
+      <button class="btn btn-sm" id="map-validate-selected">Validate Selected Mapping</button>
       <span id="map-save-result" style="font-size:12px;color:var(--muted);"></span>
     </div>
+    <div id="map-validation-result" style="font-size:12px;color:var(--muted);margin-bottom:10px;"></div>
     <div class="tw"><table>
       <thead><tr><th>PS Category</th><th>Products</th><th>Current AY Mapping</th><th>Search AY</th><th>Search Results</th></tr></thead>
       <tbody id="mappings-body"><tr><td colspan="5" class="loading"><span class="spin">⟳</span> Loading...</td></tr></tbody>

@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<prestashop><cart><id_currency>1</id_currency><id_lang>1</id_lang><id_customer>256</id_customer><id_address_delivery>230</id_address_delivery><id_address_invoice>230</id_address_invoice><id_carrier>24</id_carrier><id_shop>1</id_shop><id_shop_group>1</id_shop_group><associations><cart_rows><cart_row><id_product>3</id_product><id_product_attribute>522</id_product_attribute><id_address_delivery>230</id_address_delivery><quantity>1</quantity></cart_row></cart_rows></associations></cart></prestashop>
