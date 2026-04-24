@@ -6,11 +6,15 @@ namespace SyncBridge\Integration;
 
 use SyncBridge\Support\HttpClient;
 use SyncBridge\Support\AttributeTypeGuesser;
+use SyncBridge\Support\AyDocsPolicy;
 
 final class AboutYouClient
 {
     private string $baseUrl;
     private string $apiKey;
+    private AyDocsPolicy $policy;
+    /** @var array<string,array|null> */
+    private array $orderCache = [];
 
     public function __construct(private readonly HttpClient $http)
     {
@@ -20,6 +24,7 @@ final class AboutYouClient
         if ($this->apiKey === '') {
             throw new \RuntimeException('AboutYou is not configured. Set AY_API_KEY.');
         }
+        $this->policy = new AyDocsPolicy();
     }
 
     public function upsertProducts(array $variants): array
@@ -107,9 +112,13 @@ final class AboutYouClient
 
     public function getOrder(string $orderId): ?array
     {
+        if (array_key_exists($orderId, $this->orderCache)) {
+            return $this->orderCache[$orderId];
+        }
         $response = $this->request('GET', '/orders/', ['order_number' => $orderId]);
         $items = $response['json']['items'] ?? [];
-        return $items[0] ?? null;
+        $this->orderCache[$orderId] = $items[0] ?? null;
+        return $this->orderCache[$orderId];
     }
 
     public function searchCategories(?string $query = null, int $page = 1, int $perPage = 25): array
@@ -359,7 +368,7 @@ final class AboutYouClient
     private function pollBatch(string $path, string $batchId): array
     {
         $attempts = max(3, (int) ($_ENV['AY_BATCH_POLL_ATTEMPTS'] ?? 10));
-        $sleepMs = max(500, (int) ($_ENV['AY_BATCH_POLL_MS'] ?? 1500));
+        $baseSleepMs = max(400, (int) ($_ENV['AY_BATCH_POLL_MS'] ?? 1500));
 
         for ($i = 0; $i < $attempts; $i++) {
             $response = $this->request('GET', $path, ['batch_request_id' => $batchId]);
@@ -374,6 +383,13 @@ final class AboutYouClient
                 return $body;
             }
 
+            if ($status === 'retry') {
+                // Retry status means backend asked us to back off.
+                $sleepMs = min(15_000, (int) round($baseSleepMs * 2.5));
+            } else {
+                // Progressive backoff to reduce hot polling load.
+                $sleepMs = min(10_000, $baseSleepMs + ($i * 350));
+            }
             usleep($sleepMs * 1000);
         }
 
@@ -388,11 +404,15 @@ final class AboutYouClient
         foreach ($items as $item) {
             $errors = $item['errors'] ?? [];
             $success = (bool) ($item['success'] ?? empty($errors));
+            $errorText = implode('; ', array_map('strval', $errors));
+            $reasonCode = $success ? 'success' : $this->policy->classifyAyError($errorText);
             $normalized[] = [
                 'success' => $success,
                 'request' => $item['requestItem'] ?? $item['request_item'] ?? null,
                 'errors' => $errors,
-                'error' => $success ? null : implode('; ', array_map('strval', $errors)),
+                'error' => $success ? null : $errorText,
+                'reason_code' => $reasonCode,
+                'retryable' => !$success && in_array($reasonCode, ['ay_rate_limit', 'ay_timeout', 'ay_unknown'], true),
             ];
         }
 
@@ -406,12 +426,18 @@ final class AboutYouClient
             $url .= '?' . http_build_query($query);
         }
 
+        $baseInterval = (int) ($_ENV['AY_MIN_INTERVAL_MS'] ?? 650);
+        $adaptiveThrottle = filter_var($_ENV['FEATURE_AY_ADAPTIVE_THROTTLE'] ?? true, FILTER_VALIDATE_BOOLEAN);
+        $policyInterval = $adaptiveThrottle
+            ? $this->policy->minIntervalMsForPath($path, $baseInterval)
+            : $baseInterval;
+
         return $this->http->request('aboutyou', $method, $url, [
             'X-API-Key' => $this->apiKey,
             'Accept' => 'application/json',
         ], $body, [
             'expect_json' => true,
-            'min_interval_ms' => (int) ($_ENV['AY_MIN_INTERVAL_MS'] ?? 650),
+            'min_interval_ms' => $policyInterval,
             'timeout' => (int) ($_ENV['AY_TIMEOUT_SEC'] ?? 60),
         ]);
     }

@@ -19,6 +19,8 @@ final class PrestaShopClient
     private int $lastResolvedCarrierId = 0;
     private ?string $lastApiError = null;
     private ?string $lastOutboundXml = null;
+    /** @var array<int,string> */
+    private array $lastOutboundXmlHistory = [];
 
     public function __construct(private readonly HttpClient $http)
     {
@@ -411,21 +413,15 @@ final class PrestaShopClient
         $totalProducts6 = $this->fmt6($totals['total_products']);
         $totalShipping6 = $this->fmt6($totals['total_shipping']);
         $zero6 = '0.000000';
-        $secureKey = md5(uniqid((string) $orderPayload['id_customer'], true));
-        $zeroDate = '0000-00-00 00:00:00';
+        $secureKey = $this->resolveCustomerSecureKey((int) $orderPayload['id_customer']);
+        $orderDate = date('Y-m-d H:i:s');
 
         $orderRows = [];
         foreach ($items as $item) {
-            $unit = (float) ($item['unit_price'] ?? 0);
             $orderRows[] = [
                 'product_id' => (int) ($item['product_id'] ?? 0),
                 'product_attribute_id' => (int) ($item['combo_id'] ?? 0),
                 'product_quantity' => (int) ($item['quantity'] ?? 1),
-                'product_name' => (string) ($item['product_name'] ?? ('Product #' . (int) ($item['product_id'] ?? 0))),
-                'product_reference' => (string) ($item['sku'] ?? ''),
-                'product_price' => $this->fmt6($unit),
-                'unit_price_tax_incl' => $this->fmt6($unit),
-                'unit_price_tax_excl' => $this->fmt6($unit),
             ];
         }
 
@@ -441,7 +437,8 @@ final class PrestaShopClient
             'module' => $module,
             'invoice_number' => 0,
             'delivery_number' => 0,
-            'delivery_date' => $zeroDate,
+            'invoice_date' => $orderDate,
+            'delivery_date' => $orderDate,
             'valid' => 0,
             'id_shop_group' => 1,
             'id_shop' => $defaultShopId,
@@ -508,7 +505,8 @@ final class PrestaShopClient
                     'total_shipping' => $totalShipping6,
                     'invoice_number' => 0,
                     'delivery_number' => 0,
-                    'delivery_date' => $zeroDate,
+                    'invoice_date' => $orderDate,
+                    'delivery_date' => $orderDate,
                     'valid' => 0,
                 ];
                 $orderId = $this->createResource('orders', $minimal);
@@ -846,6 +844,14 @@ final class PrestaShopClient
         return $this->lastOutboundXml;
     }
 
+    /**
+     * @return array<int,string>
+     */
+    public function getLastOutboundXmlHistory(): array
+    {
+        return $this->lastOutboundXmlHistory;
+    }
+
     public function listOrderStatesBrief(): array
     {
         try {
@@ -1014,6 +1020,34 @@ final class PrestaShopClient
         return $fallback > 0 ? $fallback : max(1, $configured);
     }
 
+    private function resolveCustomerSecureKey(int $customerId): string
+    {
+        if ($customerId > 0) {
+            try {
+                $customer = $this->getResourceById('customers', $customerId);
+                $key = trim((string) ($customer['secure_key'] ?? ''));
+                if ($key !== '') {
+                    return $key;
+                }
+            } catch (\Throwable) {
+            }
+
+            try {
+                $rows = $this->collectResources('customers', [
+                    'filter[id]' => '[' . $customerId . ']',
+                    'display' => '[id,secure_key]',
+                ], 1);
+                $key = trim((string) ($rows[0]['secure_key'] ?? ''));
+                if ($key !== '') {
+                    return $key;
+                }
+            } catch (\Throwable) {
+            }
+        }
+
+        return md5('customer-' . $customerId);
+    }
+
     /**
      * Select a real installed payment module to avoid empty-body HTTP 500
      * when PrestaShop receives an unknown module in Order::addWs().
@@ -1051,10 +1085,47 @@ final class PrestaShopClient
             return [(string) $first, $payment];
         }
 
+        // If module listing isn't available for this API key, reuse a known-good
+        // module/payment combination from the latest existing order.
+        $recent = $this->getLatestOrderModuleAndPayment();
+        if ($recent !== null) {
+            // For test order creation, prefer a known-good provider pair from
+            // the latest real order instead of potentially stale env values.
+            if ($recent['module'] !== '' && $recent['payment'] !== '') {
+                return [$recent['module'], $recent['payment']];
+            }
+        }
+
         // Keep old behavior if module listing isn't accessible.
-        $fallbackModule = trim($configuredModule) !== '' ? trim($configuredModule) : 'ps_wirepayment';
-        $fallbackPayment = trim($configuredPayment) !== '' ? trim($configuredPayment) : 'Bank wire';
+        $fallbackModule = trim($configuredModule) !== '' ? trim($configuredModule) : 'multisafepay';
+        $fallbackPayment = trim($configuredPayment) !== '' ? trim($configuredPayment) : 'iDEAL';
         return [$fallbackModule, $fallbackPayment];
+    }
+
+    /**
+     * @return array{module:string,payment:string}|null
+     */
+    private function getLatestOrderModuleAndPayment(): ?array
+    {
+        try {
+            $rows = $this->collectResources('orders', [
+                'display' => '[id,module,payment]',
+                'sort' => '[id_DESC]',
+            ], 1);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        $row = $rows[0] ?? null;
+        if (!is_array($row)) {
+            return null;
+        }
+        $module = trim((string) ($row['module'] ?? ''));
+        $payment = trim((string) ($row['payment'] ?? ''));
+        if ($module === '' || $payment === '') {
+            return null;
+        }
+        return ['module' => $module, 'payment' => $payment];
     }
 
 
@@ -1168,6 +1239,12 @@ final class PrestaShopClient
         // payload when the shop doesn't expose a schema.
         $xml = $this->buildXmlFromBlankSchema($resource, $payload) ?? $this->buildXmlPayload($resource, $payload);
         $this->lastOutboundXml = $xml;
+        if ($xml !== '') {
+            $this->lastOutboundXmlHistory[] = $xml;
+            if (count($this->lastOutboundXmlHistory) > 10) {
+                $this->lastOutboundXmlHistory = array_slice($this->lastOutboundXmlHistory, -10);
+            }
+        }
         try {
             $response = $this->request('POST', $resource, [], $xml, [
                 'Content-Type' => 'application/xml',

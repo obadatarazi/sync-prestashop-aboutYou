@@ -174,18 +174,24 @@ class OrderSyncService
         foreach ($psOrders as $psOrder) {
             $psId  = (int)($psOrder['id'] ?? 0);
             $ayRow = \SyncBridge\Database\Database::fetchOne(
-                'SELECT ay_order_id FROM orders WHERE ps_order_id = ?', [$psId]
+                'SELECT ay_order_id, ay_status FROM orders WHERE ps_order_id = ?', [$psId]
             );
             if (!$ayRow) continue;
 
             $ayStatus = $this->mapper->mapPsStatusToAy($psOrder);
+            $existingAyStatus = strtolower(trim((string) ($ayRow['ay_status'] ?? '')));
+            $idempotentStatusPush = filter_var($_ENV['FEATURE_IDEMPOTENT_STATUS_PUSH'] ?? true, FILTER_VALIDATE_BOOLEAN);
+            if ($idempotentStatusPush && $existingAyStatus !== '' && $existingAyStatus === strtolower($ayStatus)) {
+                // Idempotency safeguard: avoid duplicate status pushes.
+                continue;
+            }
             $extra    = [];
             if ($ayStatus === 'shipped' && !empty($psOrder['shipping_number'])) {
                 $extra['tracking_number'] = $psOrder['shipping_number'];
             }
 
             if ($this->ay->updateOrderStatus($ayRow['ay_order_id'], $ayStatus, $extra)) {
-                $this->orders->markStatusPushed($ayRow['ay_order_id']);
+                $this->orders->markStatusPushed($ayRow['ay_order_id'], $ayStatus);
                 $this->retryJobs->markDone('order_status', (string) $ayRow['ay_order_id']);
                 $this->stats['statuses_pushed']++;
                 $this->logger->info("✓ Status PS#{$psId} → AY: {$ayStatus}");
@@ -212,34 +218,46 @@ class OrderSyncService
         $resolved = [];
         foreach ($items as $item) {
             $sku = trim((string)($item['sku'] ?? ''));
+            $ean = trim((string)($item['ean'] ?? $item['ean13'] ?? ''));
 
             // Try DB mapping first (fastest)
-            $dbRow = \SyncBridge\Database\Database::fetchOne(
-                "SELECT v.product_id AS product_id, v.ps_combo_id AS combo_id
-                 FROM product_variants v WHERE UPPER(v.sku) = UPPER(?)",
-                [$sku]
-            );
+            $dbRow = null;
+            if ($sku !== '') {
+                $dbRow = \SyncBridge\Database\Database::fetchOne(
+                    "SELECT v.product_id AS product_id, v.ps_combo_id AS combo_id
+                     FROM product_variants v WHERE UPPER(v.sku) = UPPER(?) LIMIT 1",
+                    [$sku]
+                );
+            }
+            if ($dbRow === null && $ean !== '') {
+                $dbRow = \SyncBridge\Database\Database::fetchOne(
+                    "SELECT v.product_id AS product_id, v.ps_combo_id AS combo_id
+                     FROM product_variants v WHERE v.ean13 = ? LIMIT 1",
+                    [$ean]
+                );
+            }
             if ($dbRow) {
                 $resolved[] = array_merge($item, $dbRow);
                 continue;
             }
 
-            // Try PS API by reference
+            // Deterministic precedence: SKU reference, then EAN.
             if ($sku !== '') {
                 $combo = $this->ps->findCombinationByReference($sku);
                 if ($combo) { $resolved[] = array_merge($item, $combo); continue; }
 
                 $prodId = $this->ps->findProductIdByReference($sku);
                 if ($prodId) { $resolved[] = array_merge($item, ['product_id' => $prodId, 'combo_id' => 0]); continue; }
+            }
 
-                $comboByEan = $this->ps->findCombinationByEan($sku);
+            if ($ean !== '') {
+                $comboByEan = $this->ps->findCombinationByEan($ean);
                 if ($comboByEan) { $resolved[] = array_merge($item, $comboByEan); continue; }
-
-                $prodByEan = $this->ps->findProductIdByEan($sku);
+                $prodByEan = $this->ps->findProductIdByEan($ean);
                 if ($prodByEan) { $resolved[] = array_merge($item, ['product_id' => $prodByEan, 'combo_id' => 0]); continue; }
             }
 
-            $this->logger->warning("Could not resolve SKU to PS product", ['sku' => $sku]);
+            $this->logger->warning("Could not resolve order item to PS product", ['sku' => $sku, 'ean13' => $ean]);
         }
         return $resolved;
     }

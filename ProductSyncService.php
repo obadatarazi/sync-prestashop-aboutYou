@@ -6,6 +6,7 @@ use SyncBridge\Database\ProductRepository;
 use SyncBridge\Database\RetryJobRepository;
 use SyncBridge\Database\SyncRunRepository;
 use SyncBridge\Database\Database;
+use SyncBridge\Support\AyDocsPolicy;
 use SyncBridge\Support\ValidationException;
 
 /**
@@ -42,6 +43,7 @@ class ProductSyncService
         'fetched' => 0, 'pushed' => 0, 'skipped' => 0, 'failed' => 0,
     ];
     private int $lastProgressUpdateMs = 0;
+    private AyDocsPolicy $ayPolicy;
 
     public function __construct(
         string  $runId,
@@ -59,6 +61,7 @@ class ProductSyncService
         $this->retryJobs       = new RetryJobRepository();
         $this->runs            = new SyncRunRepository();
         $this->logger          = new DbSyncLogger($runId, 'sync');
+        $this->ayPolicy        = new AyDocsPolicy();
     }
 
     // ----------------------------------------------------------------
@@ -113,6 +116,8 @@ class ProductSyncService
         $psProducts = $this->ps->getProductsModifiedSince($since);
         $stockItems = [];
         $priceItems = [];
+        $maxBatchItems = max(50, (int) ($_ENV['AY_STOCK_PRICE_BATCH_SIZE'] ?? 500));
+        $flushResults = [];
 
         foreach ($psProducts as $psProduct) {
             $productId = $this->products->upsertFromPrestaShop($psProduct);
@@ -135,19 +140,28 @@ class ProductSyncService
                     ],
                     'valid_at' => gmdate('c'),
                 ];
+
+                if (count($stockItems) >= $maxBatchItems || count($priceItems) >= $maxBatchItems) {
+                    $flushResults[] = $this->flushStockPriceBatch($stockItems, $priceItems);
+                    $stockItems = [];
+                    $priceItems = [];
+                }
             }
         }
 
-        $stockResults = $this->ay->updateStocks($stockItems);
-        $priceResults = $this->ay->updatePrices($priceItems);
+        if ($stockItems !== [] || $priceItems !== []) {
+            $flushResults[] = $this->flushStockPriceBatch($stockItems, $priceItems);
+        }
 
-        foreach ([$stockResults, $priceResults] as $resultSet) {
+        foreach ($flushResults as $resultPair) {
+            foreach ($resultPair as $resultSet) {
             foreach ($resultSet as $result) {
                 if (!empty($result['error'])) {
                     $this->stats['failed']++;
                 } else {
                     $this->stats['pushed']++;
                 }
+            }
             }
         }
 
@@ -313,10 +327,12 @@ class ProductSyncService
                 foreach ($results as $res) {
                     if (isset($res['error'])) {
                         $hasError = true;
+                        $reasonCode = (string) ($res['reason_code'] ?? $this->ayPolicy->classifyAyError((string) $res['error']));
                         $this->logger->error("AY push failed PS#{$psId}", [
                             'error' => $res['error'],
-                            'reason_code' => 'ay_api_contract',
-                            'retryable' => false,
+                            'reason_code' => $reasonCode,
+                            'retryable' => (bool) ($res['retryable'] ?? in_array($reasonCode, ['ay_rate_limit', 'ay_timeout', 'ay_unknown'], true)),
+                            'hint' => $this->triageHintForReason($reasonCode),
                         ]);
                     }
                 }
@@ -332,7 +348,7 @@ class ProductSyncService
                         $productId,
                         $psId,
                         'push',
-                        'ay_api_contract',
+                        $this->ayPolicy->classifyAyError($errorMessage),
                         $errorMessage,
                         ['results' => $results]
                     );
@@ -641,6 +657,17 @@ class ProductSyncService
         ];
     }
 
+    private function triageHintForReason(string $reasonCode): string
+    {
+        return match ($reasonCode) {
+            'ay_rate_limit' => 'Back off request rate and verify endpoint limits from AY docs policy.',
+            'ay_auth' => 'Verify AY API key and permissions for the endpoint.',
+            'ay_validation' => 'Inspect required fields and payload schema for this endpoint.',
+            'ay_deprecated' => 'Migrate deprecated endpoint/event usage to AY recommended alternatives.',
+            default => 'Check transport and payload details; retry if transient.',
+        };
+    }
+
     private function recordProductErrorEvent(
         int $productId,
         int $psId,
@@ -692,5 +719,15 @@ class ProductSyncService
         }
 
         return (int) ($_ENV['AY_CATEGORY_ID'] ?? 0);
+    }
+
+    /**
+     * @return array{0:array,1:array}
+     */
+    private function flushStockPriceBatch(array $stockItems, array $priceItems): array
+    {
+        $stockResults = $stockItems !== [] ? $this->ay->updateStocks($stockItems) : [];
+        $priceResults = $priceItems !== [] ? $this->ay->updatePrices($priceItems) : [];
+        return [$stockResults, $priceResults];
     }
 }

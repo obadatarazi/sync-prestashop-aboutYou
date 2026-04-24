@@ -44,4 +44,29 @@ final class RetryJobRepository
             [$limit]
         );
     }
+
+    public function scheduleRetry(string $jobType, string $entityKey, string $reason, int $attempts): void
+    {
+        $backoffSec = min(3600, (int) (pow(2, max(1, $attempts)) * 15));
+        Database::execute(
+            "UPDATE retry_jobs
+             SET status='pending',
+                 attempts=?,
+                 last_error=?,
+                 next_retry_at=DATE_ADD(NOW(), INTERVAL ? SECOND),
+                 updated_at=NOW()
+             WHERE job_type=? AND entity_key=?",
+            [$attempts, $reason, $backoffSec, $jobType, $entityKey]
+        );
+    }
+
+    public function markDead(string $jobType, string $entityKey, string $reason): void
+    {
+        Database::execute(
+            "UPDATE retry_jobs
+             SET status='dead', last_error=?, updated_at=NOW()
+             WHERE job_type=? AND entity_key=?",
+            [$reason, $jobType, $entityKey]
+        );
+    }
 }

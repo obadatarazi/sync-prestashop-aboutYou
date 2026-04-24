@@ -147,11 +147,15 @@ class OrderRepository
         );
     }
 
-    public function markStatusPushed(string $ayOrderId): void
+    public function markStatusPushed(string $ayOrderId, ?string $ayStatus = null): void
     {
         Database::execute(
-            "UPDATE orders SET sync_status='status_pushed', last_synced_at=NOW() WHERE ay_order_id=?",
-            [$ayOrderId]
+            "UPDATE orders
+             SET sync_status='status_pushed',
+                 ay_status=COALESCE(?, ay_status),
+                 last_synced_at=NOW()
+             WHERE ay_order_id=?",
+            [$ayStatus, $ayOrderId]
         );
     }
 

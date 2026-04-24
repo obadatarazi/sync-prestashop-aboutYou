@@ -35,6 +35,8 @@ use SyncBridge\Integration\PrestaShopClient;
 use SyncBridge\Services\SyncRunner;
 use SyncBridge\Support\AttributeTypeGuesser;
 use SyncBridge\Support\HttpClient;
+use SyncBridge\Support\AyDocsPolicy;
+use SyncBridge\Database\SyncMetricsRepository;
 
 require_once __DIR__ . '/../src/bootstrap.php';
 
@@ -63,6 +65,15 @@ function json_out(int $code, array $body): never
     http_response_code($code);
     echo json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
+}
+
+function bounded_page_size(mixed $requested, int $default, int $max): int
+{
+    $value = (int) $requested;
+    if ($value <= 0) {
+        $value = $default;
+    }
+    return min($max, max(1, $value));
 }
 
 function require_auth(): void
@@ -233,6 +244,21 @@ if ($action === 'status') {
     $pidPath = resolveSyncPidPath();
     $syncPid = is_file($pidPath) ? (int) trim((string) @file_get_contents($pidPath)) : 0;
 
+    $policyWarnings = [];
+    try {
+        $policy = new AyDocsPolicy();
+        $configured = (int) ($_ENV['AY_MIN_INTERVAL_MS'] ?? 650);
+        $recommended = $policy->minIntervalMsForPath('/products/stocks', 650);
+        if ($configured < $recommended) {
+            $policyWarnings[] = sprintf(
+                'AY_MIN_INTERVAL_MS (%d) is lower than docs-policy recommendation (%d) for stock updates.',
+                $configured,
+                $recommended
+            );
+        }
+    } catch (\Throwable) {
+    }
+
     json_out(200, ['ok' => true, 'data' => [
         'products'    => $products->getStats(),
         'orders'      => $orders->getStats(),
@@ -240,6 +266,7 @@ if ($action === 'status') {
         'current_run' => $runs->getCurrent(),
         'sync_pid'    => $syncPid > 0 ? $syncPid : null,
         'recent_runs' => $runs->getRecent(5),
+        'policy_warnings' => $policyWarnings,
     ]]);
 }
 
@@ -249,7 +276,7 @@ if ($action === 'status') {
 if ($action === 'products') {
     $repo = new ProductRepository();
     $page    = max(1, (int)($input['page'] ?? 1));
-    $perPage = min(50, max(1, (int)($input['per_page'] ?? 20)));
+    $perPage = bounded_page_size($input['per_page'] ?? null, 20, 50);
     $result  = $repo->findAll($page, $perPage, [
         'status' => $input['status'] ?? '',
         'search' => $input['search'] ?? '',
@@ -260,7 +287,7 @@ if ($action === 'products') {
 if ($action === 'products_compare') {
     $repo = new ProductRepository();
     $page    = max(1, (int)($input['page'] ?? 1));
-    $perPage = min(50, max(1, (int)($input['per_page'] ?? 20)));
+    $perPage = bounded_page_size($input['per_page'] ?? null, 20, 50);
     $bucket = strtolower(trim((string) ($input['bucket'] ?? 'not_synced')));
     if (!in_array($bucket, ['', 'synced', 'not_synced'], true)) {
         json_out(400, ['ok' => false, 'error' => 'bucket must be synced or not_synced']);
@@ -544,7 +571,7 @@ if ($action === 'product_auto_map_attributes') {
 if ($action === 'orders') {
     $repo    = new OrderRepository();
     $page    = max(1, (int)($input['page'] ?? 1));
-    $perPage = min(50, max(1, (int)($input['per_page'] ?? 20)));
+    $perPage = bounded_page_size($input['per_page'] ?? null, 20, 50);
     $result  = $repo->findAll($page, $perPage, [
         'status' => $input['status'] ?? '',
         'search' => $input['search'] ?? '',
@@ -793,7 +820,7 @@ if ($action === 'logs') {
         'search'  => $input['search']  ?? '',
     ];
     $page = max(1, (int)($input['page'] ?? 1));
-    $perPage = min(200, max(1, (int)($input['per_page'] ?? ($input['limit'] ?? 50))));
+    $perPage = bounded_page_size($input['per_page'] ?? ($input['limit'] ?? null), 50, 200);
     json_out(200, ['ok' => true, 'data' => $repo->getLogsPage(array_filter($filters), $page, $perPage)]);
 }
 
@@ -830,13 +857,45 @@ if ($action === 'sync_runs') {
     json_out(200, ['ok' => true, 'data' => $repo->getRecent(30)]);
 }
 
+if ($action === 'metrics') {
+    $repo = new SyncMetricsRepository();
+    $limit = bounded_page_size($input['limit'] ?? null, 100, 1000);
+    json_out(200, ['ok' => true, 'data' => $repo->recentMetrics($limit)]);
+}
+
+if ($action === 'policy_snapshot') {
+    $latest = Database::fetchOne(
+        "SELECT id, source, version_tag, payload_json, created_at
+         FROM ay_policy_snapshots
+         ORDER BY created_at DESC
+         LIMIT 1"
+    );
+    json_out(200, ['ok' => true, 'data' => $latest]);
+}
+
+if ($action === 'policy_snapshot_refresh') {
+    require_csrf($input);
+    $policy = new AyDocsPolicy();
+    $payload = $policy->snapshotPayload();
+    Database::execute(
+        "INSERT INTO ay_policy_snapshots (source, version_tag, payload_json)
+         VALUES (?, ?, ?)",
+        [
+            'mcp_docs',
+            'local-policy-v1',
+            json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        ]
+    );
+    json_out(200, ['ok' => true, 'data' => ['saved' => true, 'payload' => $payload]]);
+}
+
 // ----------------------------------------------------------------
 // IMAGES
 // ----------------------------------------------------------------
 if ($action === 'images') {
     $repo = new ProductRepository();
     $page    = max(1, (int)($input['page'] ?? 1));
-    $perPage = min(50, max(1, (int)($input['per_page'] ?? 24)));
+    $perPage = bounded_page_size($input['per_page'] ?? null, 24, 50);
     $offset  = ($page - 1) * $perPage;
     $status  = $input['status'] ?? '';
 
@@ -2297,36 +2356,58 @@ function push_local_order_to_prestashop(int $orderId): array
     try {
         $psOrderId = (int) ($ps->createOrder($payload) ?? 0);
     } catch (\Throwable $e) {
+        $saved = [];
+        $history = method_exists($ps, 'getLastOutboundXmlHistory') ? (array) $ps->getLastOutboundXmlHistory() : [];
         $xml = method_exists($ps, 'getLastOutboundXml') ? (string) $ps->getLastOutboundXml() : '';
-        if ($xml !== '') {
+        if ($history === [] && $xml !== '') {
+            $history = [$xml];
+        }
+        if ($history !== []) {
             $dir = __DIR__ . '/../logs';
             if (!is_dir($dir)) {
                 @mkdir($dir, 0775, true);
             }
-            @file_put_contents(
-                $dir . '/ps_order_payload_' . $orderId . '_' . date('Ymd_His') . '.xml',
-                $xml
-            );
+            $stamp = date('Ymd_His');
+            foreach ($history as $idx => $attemptXml) {
+                $attemptXml = (string) $attemptXml;
+                if ($attemptXml === '') {
+                    continue;
+                }
+                $name = 'ps_order_payload_' . $orderId . '_' . $stamp . '_a' . ($idx + 1) . '.xml';
+                @file_put_contents($dir . '/' . $name, $attemptXml);
+                $saved[] = 'logs/' . $name;
+            }
         }
-        throw new RuntimeException($e->getMessage() . ($xml !== '' ? ' | payload_saved=logs/ps_order_payload_' . $orderId . '_*.xml' : ''));
+        throw new RuntimeException($e->getMessage() . ($saved !== [] ? ' | payloads_saved=' . implode(',', $saved) : ''));
     }
     if ($psOrderId <= 0) {
         $detail = method_exists($ps, 'getLastApiError') ? $ps->getLastApiError() : null;
+        $saved = [];
+        $history = method_exists($ps, 'getLastOutboundXmlHistory') ? (array) $ps->getLastOutboundXmlHistory() : [];
         $xml = method_exists($ps, 'getLastOutboundXml') ? (string) $ps->getLastOutboundXml() : '';
-        if ($xml !== '') {
+        if ($history === [] && $xml !== '') {
+            $history = [$xml];
+        }
+        if ($history !== []) {
             $dir = __DIR__ . '/../logs';
             if (!is_dir($dir)) {
                 @mkdir($dir, 0775, true);
             }
-            @file_put_contents(
-                $dir . '/ps_order_payload_' . $orderId . '_' . date('Ymd_His') . '.xml',
-                $xml
-            );
+            $stamp = date('Ymd_His');
+            foreach ($history as $idx => $attemptXml) {
+                $attemptXml = (string) $attemptXml;
+                if ($attemptXml === '') {
+                    continue;
+                }
+                $name = 'ps_order_payload_' . $orderId . '_' . $stamp . '_a' . ($idx + 1) . '.xml';
+                @file_put_contents($dir . '/' . $name, $attemptXml);
+                $saved[] = 'logs/' . $name;
+            }
         }
         throw new RuntimeException(
             'PrestaShop order creation failed'
             . ($detail ? '. Details: ' . $detail : '')
-            . ($xml !== '' ? ' | payload_saved=logs/ps_order_payload_' . $orderId . '_*.xml' : '')
+            . ($saved !== [] ? ' | payloads_saved=' . implode(',', $saved) : '')
         );
     }
 

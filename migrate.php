@@ -254,6 +254,37 @@ function applyPostSchemaAdjustments(PDO $pdo): void {
         echo "  ⚠ Post-migration: " . substr($e->getMessage(), 0, 120) . "\n";
     }
 
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS sync_metrics (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            run_id CHAR(16) NULL,
+            command VARCHAR(60) NOT NULL,
+            phase VARCHAR(60) NOT NULL DEFAULT 'run',
+            metric_key VARCHAR(80) NOT NULL,
+            metric_value DOUBLE NOT NULL,
+            meta_json JSON NULL,
+            created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+            INDEX idx_metric_created (created_at),
+            INDEX idx_metric_run (run_id),
+            INDEX idx_metric_key (metric_key)
+        ) ENGINE=InnoDB");
+    } catch (PDOException $e) {
+        echo "  ⚠ Post-migration: " . substr($e->getMessage(), 0, 120) . "\n";
+    }
+
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS ay_policy_snapshots (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            source VARCHAR(80) NOT NULL DEFAULT 'mcp_docs',
+            version_tag VARCHAR(80) NULL,
+            payload_json JSON NOT NULL,
+            created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+            INDEX idx_policy_created (created_at)
+        ) ENGINE=InnoDB");
+    } catch (PDOException $e) {
+        echo "  ⚠ Post-migration: " . substr($e->getMessage(), 0, 120) . "\n";
+    }
+
     ensureIndex($pdo, 'order_items', 'uq_order_item', 'ALTER TABLE order_items ADD UNIQUE KEY uq_order_item (order_id, ay_order_item_id)');
     try {
         $pdo->exec("ALTER TABLE attribute_maps MODIFY ay_group_id INT UNSIGNED NOT NULL DEFAULT 0");
@@ -294,6 +325,9 @@ function applyPostSchemaAdjustments(PDO $pdo): void {
         ['ay_country_codes', 'DE', 'string', 'Country Codes CSV', 'aboutyou'],
         ['ay_batch_poll_attempts', '10', 'integer', 'Batch Poll Attempts', 'aboutyou'],
         ['ay_batch_poll_ms', '1500', 'integer', 'Batch Poll Interval (ms)', 'aboutyou'],
+        ['feature_ay_adaptive_throttle', 'true', 'boolean', 'Feature: AY adaptive throttle', 'features'],
+        ['feature_idempotent_status_push', 'true', 'boolean', 'Feature: idempotent status push', 'features'],
+        ['feature_sync_metrics', 'true', 'boolean', 'Feature: sync metrics storage', 'features'],
     ];
 
     $stmt = $pdo->prepare(

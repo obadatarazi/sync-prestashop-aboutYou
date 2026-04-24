@@ -144,6 +144,8 @@ final class HttpClient
 
     private function retryDelayMicros(int $attempt): int
     {
-        return min(5_000_000, (int) ((2 ** max(0, $attempt - 1)) * 250_000));
+        $base = (int) ((2 ** max(0, $attempt - 1)) * 250_000);
+        $jitter = random_int(0, 120_000);
+        return min(5_000_000, $base + $jitter);
     }
 }

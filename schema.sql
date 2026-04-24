@@ -154,7 +154,9 @@ CREATE TABLE IF NOT EXISTS orders (
   created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_ps_order (ps_order_id),
-  INDEX idx_sync_status (sync_status)
+  INDEX idx_sync_status (sync_status),
+  INDEX idx_ay_status (ay_status),
+  INDEX idx_ay_created (ay_created_at)
 ) ENGINE=InnoDB;
 
 -- ----------------------------------------------------------------
@@ -173,6 +175,8 @@ CREATE TABLE IF NOT EXISTS order_items (
   discount_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
   item_status VARCHAR(60) NULL,
   UNIQUE KEY uq_order_item (order_id, ay_order_item_id),
+  INDEX idx_order_item_sku (sku),
+  INDEX idx_order_item_ean13 (ean13),
   FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
@@ -215,9 +219,39 @@ CREATE TABLE IF NOT EXISTS sync_logs (
   context     JSON         NULL,
   created_at  DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   INDEX idx_run (run_id),
+  INDEX idx_run_created (run_id, created_at),
   INDEX idx_level (level),
   INDEX idx_created (created_at),
   INDEX idx_channel (channel)
+) ENGINE=InnoDB;
+
+-- ----------------------------------------------------------------
+-- SYNC METRICS (time-series style counters and timings)
+-- ----------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sync_metrics (
+  id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  run_id      CHAR(16) NULL,
+  command     VARCHAR(60) NOT NULL,
+  phase       VARCHAR(60) NOT NULL DEFAULT 'run',
+  metric_key  VARCHAR(80) NOT NULL,
+  metric_value DOUBLE NOT NULL,
+  meta_json   JSON NULL,
+  created_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  INDEX idx_metric_created (created_at),
+  INDEX idx_metric_run (run_id),
+  INDEX idx_metric_key (metric_key)
+) ENGINE=InnoDB;
+
+-- ----------------------------------------------------------------
+-- AY POLICY SNAPSHOTS (docs-policy drift tracking)
+-- ----------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ay_policy_snapshots (
+  id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  source      VARCHAR(80) NOT NULL DEFAULT 'mcp_docs',
+  version_tag VARCHAR(80) NULL,
+  payload_json JSON NOT NULL,
+  created_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  INDEX idx_policy_created (created_at)
 ) ENGINE=InnoDB;
 
 -- ----------------------------------------------------------------
@@ -382,7 +416,10 @@ INSERT IGNORE INTO settings (`key`, `value`, `type`, label, group_name) VALUES
 ('ay_auto_publish',           'true',  'boolean', 'Auto Publish Products',      'aboutyou'),
 ('ay_country_codes',          'DE',    'string',  'Country Codes CSV',          'aboutyou'),
 ('ay_batch_poll_attempts',    '10',    'integer', 'Batch Poll Attempts',        'aboutyou'),
-('ay_batch_poll_ms',          '1500',  'integer', 'Batch Poll Interval (ms)',   'aboutyou');
+('ay_batch_poll_ms',          '1500',  'integer', 'Batch Poll Interval (ms)',   'aboutyou'),
+('feature_ay_adaptive_throttle','true','boolean','Feature: AY adaptive throttle','features'),
+('feature_idempotent_status_push','true','boolean','Feature: idempotent status push','features'),
+('feature_sync_metrics','true','boolean','Feature: sync metrics storage','features');
 
 -- ----------------------------------------------------------------
 -- RETRY JOBS
