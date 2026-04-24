@@ -7,6 +7,7 @@ namespace SyncBridge\Support;
 final class HttpClient
 {
     private array $lastCallAt = [];
+    private array $cooldownUntilMs = [];
 
     public function __construct(
         private readonly int $defaultTimeout = 15,
@@ -90,6 +91,9 @@ final class HttpClient
                 $lastError = IntegrationException::fromHttpFailure($service, $method, $url, $status, $bodyText);
                 if ($attempt <= $this->maxRetries) {
                     $retryAfter = (int) ($responseHeaders['retry-after'] ?? 0);
+                    if ($status === 429) {
+                        $this->applyServerCooldown($service, $attempt, $retryAfter);
+                    }
                     if ($retryAfter > 0) {
                         sleep($retryAfter);
                     } else {
@@ -116,17 +120,37 @@ final class HttpClient
 
     private function applyRateLimit(string $service, int $minIntervalMs): void
     {
+        $now = (int) floor(microtime(true) * 1000);
+        $cooldownUntil = (int) ($this->cooldownUntilMs[$service] ?? 0);
+        if ($cooldownUntil > $now) {
+            usleep(($cooldownUntil - $now) * 1000);
+            $now = (int) floor(microtime(true) * 1000);
+        }
+
         if ($minIntervalMs <= 0) {
+            $this->lastCallAt[$service] = $now;
             return;
         }
 
-        $now = (int) floor(microtime(true) * 1000);
         $last = $this->lastCallAt[$service] ?? 0;
         $wait = $minIntervalMs - ($now - $last);
         if ($wait > 0) {
             usleep($wait * 1000);
         }
         $this->lastCallAt[$service] = (int) floor(microtime(true) * 1000);
+    }
+
+    private function applyServerCooldown(string $service, int $attempt, int $retryAfterSeconds): void
+    {
+        $now = (int) floor(microtime(true) * 1000);
+        $cooldownMs = $retryAfterSeconds > 0
+            ? min(60_000, max(1_000, $retryAfterSeconds * 1000))
+            : min(20_000, 1_000 * (2 ** max(0, $attempt - 1)));
+        $candidateUntil = $now + $cooldownMs;
+        $existingUntil = (int) ($this->cooldownUntilMs[$service] ?? 0);
+        if ($candidateUntil > $existingUntil) {
+            $this->cooldownUntilMs[$service] = $candidateUntil;
+        }
     }
 
     private function parseHeaders(string $headerText): array

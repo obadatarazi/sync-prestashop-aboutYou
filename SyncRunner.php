@@ -207,7 +207,11 @@ final class SyncRunner
             return null;
         }
 
-        $baseUrl = rtrim((string) ($_ENV['IMAGE_PUBLIC_BASE_URL'] ?? ''), '/');
+        $baseUrl = rtrim((string) (
+            $_ENV['IMAGE_NORMALIZE_PUBLIC_BASE_URL']
+            ?? $_ENV['IMAGE_PUBLIC_BASE_URL']
+            ?? ''
+        ), '/');
         if ($baseUrl === '') {
             $appUrl = rtrim((string) ($_ENV['APP_URL'] ?? ''), '/');
             if ($appUrl !== '') {

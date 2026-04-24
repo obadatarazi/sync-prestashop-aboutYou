@@ -43,7 +43,28 @@ class ProductRepository
                  FROM product_images i
                  WHERE i.product_id = p.id
                  ORDER BY (i.status = 'ok') DESC, i.position ASC, i.id ASC
-                 LIMIT 1) AS image_thumb_url
+                 LIMIT 1) AS image_thumb_url,
+                (SELECT e.reason_code
+                 FROM product_sync_errors e
+                 WHERE e.product_id = p.id
+                 ORDER BY e.id DESC
+                 LIMIT 1) AS last_error_reason_code,
+                (SELECT e.error_message
+                 FROM product_sync_errors e
+                 WHERE e.product_id = p.id
+                 ORDER BY e.id DESC
+                 LIMIT 1) AS last_error_message,
+                CASE
+                    WHEN p.sync_status = 'synced' THEN 'Synced on AboutYou'
+                    WHEN p.sync_status = 'syncing' THEN 'Currently syncing'
+                    WHEN p.sync_status = 'pending' THEN 'Pending sync'
+                    WHEN p.sync_status = 'quarantined' THEN 'Quarantined'
+                    WHEN COALESCE(NULLIF(p.ay_style_key, ''), '') = '' THEN 'Missing AY style key'
+                    WHEN COALESCE(NULLIF((SELECT e.error_message FROM product_sync_errors e WHERE e.product_id = p.id ORDER BY e.id DESC LIMIT 1), ''), '') <> '' THEN (SELECT e.error_message FROM product_sync_errors e WHERE e.product_id = p.id ORDER BY e.id DESC LIMIT 1)
+                    WHEN p.sync_status = 'error' AND COALESCE(NULLIF(p.sync_error, ''), '') <> '' THEN p.sync_error
+                    WHEN p.sync_status = 'error' THEN 'Sync failed; open product details for required fields'
+                    ELSE 'Needs sync review'
+                END AS readiness_reason
              FROM products p
              WHERE {$whereStr}
              ORDER BY p.ps_id ASC
@@ -71,7 +92,7 @@ class ProductRepository
             $params[] = $q;
         }
 
-        $syncedExpr = "(p.sync_status = 'synced' OR COALESCE(NULLIF(p.ay_style_key, ''), '') <> '')";
+        $syncedExpr = "(p.sync_status = 'synced')";
         if ($bucket === 'synced') {
             $where[] = $syncedExpr;
         } elseif ($bucket === 'not_synced') {
@@ -94,18 +115,29 @@ class ProductRepository
                  WHERE i.product_id = p.id
                  ORDER BY (i.status = 'ok') DESC, i.position ASC, i.id ASC
                  LIMIT 1) AS image_thumb_url,
+                (SELECT e.reason_code
+                 FROM product_sync_errors e
+                 WHERE e.product_id = p.id
+                 ORDER BY e.id DESC
+                 LIMIT 1) AS last_error_reason_code,
+                (SELECT e.error_message
+                 FROM product_sync_errors e
+                 WHERE e.product_id = p.id
+                 ORDER BY e.id DESC
+                 LIMIT 1) AS last_error_message,
                 CASE
                     WHEN {$syncedExpr} THEN 'synced'
                     ELSE 'not_synced'
                 END AS comparison_bucket,
                 CASE
-                    WHEN COALESCE(NULLIF(p.ay_style_key, ''), '') = '' THEN 'Missing AY style key'
-                    WHEN p.sync_status = 'error' AND COALESCE(NULLIF(p.sync_error, ''), '') <> '' THEN p.sync_error
-                    WHEN p.sync_status = 'error' THEN 'Sync error'
-                    WHEN p.sync_status = 'pending' THEN 'Pending sync'
+                    WHEN p.sync_status = 'synced' THEN 'Synced on AboutYou'
                     WHEN p.sync_status = 'syncing' THEN 'Currently syncing'
+                    WHEN p.sync_status = 'pending' THEN 'Pending sync'
                     WHEN p.sync_status = 'quarantined' THEN 'Quarantined'
-                    WHEN {$syncedExpr} THEN 'Synced'
+                    WHEN COALESCE(NULLIF(p.ay_style_key, ''), '') = '' THEN 'Missing AY style key'
+                    WHEN COALESCE(NULLIF((SELECT e.error_message FROM product_sync_errors e WHERE e.product_id = p.id ORDER BY e.id DESC LIMIT 1), ''), '') <> '' THEN (SELECT e.error_message FROM product_sync_errors e WHERE e.product_id = p.id ORDER BY e.id DESC LIMIT 1)
+                    WHEN p.sync_status = 'error' AND COALESCE(NULLIF(p.sync_error, ''), '') <> '' THEN p.sync_error
+                    WHEN p.sync_status = 'error' THEN 'Sync failed; open product details for required fields'
                     ELSE 'Not synced'
                 END AS comparison_reason
              FROM products p
@@ -209,6 +241,7 @@ class ProductRepository
                export_material_composition = COALESCE(NULLIF(VALUES(export_material_composition), ''), export_material_composition),
                price = VALUES(price), weight = VALUES(weight), ean13 = VALUES(ean13),
                category_ps_id = VALUES(category_ps_id), active = VALUES(active),
+               -- Keep operator-assigned AboutYou category/brand untouched on re-fetch.
                ps_updated_at = VALUES(ps_updated_at), updated_at = NOW()",
             array_values($data)
         );
@@ -220,7 +253,7 @@ class ProductRepository
     public function markSynced(int $id, string $ayStyleKey): void
     {
         Database::execute(
-            "UPDATE products SET sync_status='synced', ay_style_key=?, sync_error=NULL,
+            "UPDATE products SET sync_status='synced', ay_style_key=?, sync_error=NULL, ay_missing_payload_json=NULL,
              last_synced_at=NOW() WHERE id=?",
             [$ayStyleKey, $id]
         );
@@ -246,13 +279,15 @@ class ProductRepository
     {
         Database::execute(
             "UPDATE products
-             SET export_title = ?, export_description = ?, export_material_composition = ?, ps_api_payload = ?, ay_category_id = ?, ay_brand_id = ?, updated_at = NOW()
+             SET export_title = ?, export_description = ?, export_material_composition = ?, ps_api_payload = ?,
+                 ay_manual_required_attributes_json = ?, ay_category_id = ?, ay_brand_id = ?, updated_at = NOW()
              WHERE ps_id = ?",
             [
                 $this->nullableString($data['export_title'] ?? null),
                 $this->nullableString($data['export_description'] ?? null),
                 $this->nullableString($data['export_material_composition'] ?? null),
                 $this->nullableString($data['ps_api_payload'] ?? null),
+                $this->nullableString($data['ay_manual_required_attributes_json'] ?? null),
                 $this->nullableInt($data['ay_category_id'] ?? null),
                 $this->nullableInt($data['ay_brand_id'] ?? null),
                 $psId,
@@ -296,7 +331,13 @@ class ProductRepository
                (product_id, ps_combo_id, sku, ean13, reference, price_modifier, quantity)
              VALUES (?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
-               sku=VALUES(sku), ean13=VALUES(ean13), reference=VALUES(reference),
+              sku=VALUES(sku),
+              -- Keep local/manual EAN edits stable across PS re-fetches.
+              ean13=CASE
+                    WHEN COALESCE(NULLIF(product_variants.ean13, ''), '') <> '' THEN product_variants.ean13
+                    ELSE VALUES(ean13)
+                  END,
+              reference=VALUES(reference),
                price_modifier=VALUES(price_modifier), quantity=VALUES(quantity),
                updated_at=NOW()",
             [
@@ -356,24 +397,81 @@ class ProductRepository
     public function findImageByProductAndPsImageId(int $productId, string $psImageId): ?array
     {
         return Database::fetchOne(
-            'SELECT * FROM product_images WHERE product_id = ? AND ps_image_id = ? LIMIT 1',
+            "SELECT *
+             FROM product_images
+             WHERE product_id = ? AND ps_image_id = ?
+             ORDER BY
+               (CASE WHEN width >= 1125 AND height >= 1500 THEN 1 ELSE 0 END) DESC,
+               (CASE WHEN public_url LIKE '%/ay-normalized/%' THEN 1 ELSE 0 END) DESC,
+               id DESC
+             LIMIT 1",
             [$productId, $psImageId]
         );
     }
 
     public function upsertImage(int $productId, string $sourceUrl, string $psImageId, int $position): int
     {
+        $existing = null;
+        if ($psImageId !== '') {
+            $existing = Database::fetchOne(
+                "SELECT id
+                 FROM product_images
+                 WHERE product_id = ? AND ps_image_id = ?
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [$productId, $psImageId]
+            );
+        } else {
+            $existing = Database::fetchOne(
+                "SELECT id
+                 FROM product_images
+                 WHERE product_id = ? AND source_url = ?
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [$productId, $sourceUrl]
+            );
+        }
+
+        if ($existing !== null) {
+            $imageId = (int) ($existing['id'] ?? 0);
+            if ($imageId > 0) {
+                Database::execute(
+                    'UPDATE product_images SET source_url = ?, position = ?, updated_at = NOW() WHERE id = ?',
+                    [$sourceUrl, $position, $imageId]
+                );
+                return $imageId;
+            }
+        }
+
         Database::execute(
             "INSERT INTO product_images (product_id, ps_image_id, source_url, position, status)
-             VALUES (?, ?, ?, ?, 'pending')
-             ON DUPLICATE KEY UPDATE source_url=VALUES(source_url), position=VALUES(position)",
+             VALUES (?, ?, ?, ?, 'pending')",
             [$productId, $psImageId, $sourceUrl, $position]
         );
-        $row = Database::fetchOne(
-            'SELECT id FROM product_images WHERE product_id=? AND ps_image_id=?',
-            [$productId, $psImageId]
+        return Database::lastInsertId();
+    }
+
+    public function findExternalEanConflicts(int $productId, array $eans): array
+    {
+        $normalized = array_values(array_unique(array_filter(array_map(
+            static fn (mixed $value): string => trim((string) $value),
+            $eans
+        ))));
+        if ($productId <= 0 || $normalized === []) {
+            return [];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($normalized), '?'));
+        $params = [$productId, ...$normalized];
+        return Database::fetchAll(
+            "SELECT v.ean13, p.ps_id, p.name, p.ay_style_key, v.ps_combo_id
+             FROM product_variants v
+             JOIN products p ON p.id = v.product_id
+             WHERE v.product_id <> ?
+               AND v.ean13 IN ({$placeholders})
+             ORDER BY v.ean13 ASC, p.ps_id ASC, v.ps_combo_id ASC",
+            $params
         );
-        return (int) ($row['id'] ?? Database::lastInsertId());
     }
 
     public function markImageOk(int $imageId, string $localPath, string $publicUrl, int $w, int $h, int $bytes): void

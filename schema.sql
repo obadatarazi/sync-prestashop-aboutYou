@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS products (
   export_description  TEXT         NULL,
   export_material_composition TEXT NULL,
   ps_api_payload      LONGTEXT     NULL,
+  ay_manual_required_attributes_json LONGTEXT NULL,
+  ay_missing_payload_json LONGTEXT NULL,
   price               DECIMAL(10,2) NOT NULL DEFAULT 0.00,
   weight              DECIMAL(8,3)  NOT NULL DEFAULT 0.000,
   ean13               VARCHAR(20)  NULL,

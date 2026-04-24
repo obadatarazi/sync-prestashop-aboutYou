@@ -609,6 +609,7 @@ final class AboutYouMapper
         if (!is_array($raw)) {
             return [];
         }
+        $excluded = $this->resolveNotNeededGroupIds($psProduct);
         $groups = [];
         foreach ($raw as $group) {
             if (!is_array($group)) {
@@ -616,6 +617,9 @@ final class AboutYouMapper
             }
             $id = (int) ($group['id'] ?? $group['group_id'] ?? $group['ay_group_id'] ?? 0);
             if ($id <= 0) {
+                continue;
+            }
+            if (isset($excluded[$id])) {
                 continue;
             }
             $required = $group['required'] ?? true;
@@ -652,8 +656,29 @@ final class AboutYouMapper
     private function resolveRequiredAttributeDefaults(array $psProduct): array
     {
         $requiredGroups = $this->resolveRequiredAttributeGroups($psProduct);
+        $manualRequiredMap = $this->resolveManualRequiredAttributeMap($psProduct);
+        $excludedGroupIds = $this->resolveNotNeededGroupIds($psProduct);
         if ($requiredGroups === []) {
-            return ['ids' => [], 'group_ids' => [], 'warnings' => []];
+            // AY metadata can be incomplete/missing. Still apply explicit product-level
+            // manual overrides so admin-entered required attributes are not ignored.
+            $ids = [];
+            $groupIds = [];
+            $warnings = [];
+            foreach ($manualRequiredMap as $groupId => $ayId) {
+                $groupId = (int) $groupId;
+                $ayId = (int) $ayId;
+                if ($groupId <= 0 || $ayId <= 0 || isset($excludedGroupIds[$groupId])) {
+                    continue;
+                }
+                $ids[] = $ayId;
+                $groupIds[] = $groupId;
+                $warnings[] = 'required group group_' . $groupId . ' (id ' . $groupId . ') satisfied via product_manual_override_without_metadata';
+            }
+            return [
+                'ids' => array_values(array_unique(array_filter($ids))),
+                'group_ids' => array_values(array_unique(array_filter($groupIds))),
+                'warnings' => $warnings,
+            ];
         }
         $categoryId = $this->resolveCategoryId($psProduct);
         $ids = [];
@@ -664,11 +689,21 @@ final class AboutYouMapper
             if ($groupId <= 0) {
                 continue;
             }
+            if (isset($excludedGroupIds[$groupId])) {
+                $warnings[] = 'required group ' . (string) ($group['name'] ?? ('group_' . $groupId))
+                    . ' (id ' . $groupId . ') skipped because AY marked it as not-needed for this category';
+                continue;
+            }
             $defaultId = 0;
             $source = 'none';
             $groupName = (string) ($group['name'] ?? 'group_' . $groupId);
 
-            if ($categoryId > 0) {
+            if (isset($manualRequiredMap[$groupId]) && (int) $manualRequiredMap[$groupId] > 0) {
+                $defaultId = (int) $manualRequiredMap[$groupId];
+                $source = 'product_manual_override';
+            }
+
+            if ($defaultId <= 0 && $categoryId > 0) {
                 $catDefault = $this->safeFetchValue(
                     'SELECT default_ay_id FROM ay_required_group_defaults WHERE ay_category_id = ? AND ay_group_id = ? LIMIT 1',
                     [$categoryId, $groupId]
@@ -716,6 +751,60 @@ final class AboutYouMapper
             'group_ids' => array_values(array_unique(array_filter($groupIds))),
             'warnings' => $warnings,
         ];
+    }
+
+    /**
+     * @return array<int,int>
+     */
+    private function resolveManualRequiredAttributeMap(array $psProduct): array
+    {
+        $raw = $psProduct['ay_manual_required_attributes_json'] ?? null;
+        if (!is_string($raw) || trim($raw) === '') {
+            return [];
+        }
+        $decoded = json_decode($raw, true);
+        if (!is_array($decoded)) {
+            return [];
+        }
+        $map = [];
+        foreach ($decoded as $groupId => $ayId) {
+            $groupIdInt = (int) $groupId;
+            $ayIdInt = (int) $ayId;
+            if ($groupIdInt > 0 && $ayIdInt > 0) {
+                $map[$groupIdInt] = $ayIdInt;
+            }
+        }
+        return $map;
+    }
+
+    /**
+     * @return array<int,true>
+     */
+    private function resolveNotNeededGroupIds(array $psProduct): array
+    {
+        $raw = $psProduct['ay_missing_payload_json'] ?? null;
+        if (!is_string($raw) || trim($raw) === '') {
+            return [];
+        }
+        $decoded = json_decode($raw, true);
+        if (!is_array($decoded)) {
+            return [];
+        }
+        $rows = $decoded['not_needed_groups'] ?? [];
+        if (!is_array($rows)) {
+            return [];
+        }
+        $map = [];
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $groupId = (int) ($row['group_id'] ?? 0);
+            if ($groupId > 0) {
+                $map[$groupId] = true;
+            }
+        }
+        return $map;
     }
 
     /**

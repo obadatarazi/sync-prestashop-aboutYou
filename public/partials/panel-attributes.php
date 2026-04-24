@@ -29,6 +29,11 @@
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
         <button class="btn btn-sm" id="req-defaults-refresh">Refresh</button>
+        <button class="btn btn-sm" id="req-defaults-autofill">Auto-fill from AY</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted);">
+          <input type="checkbox" id="req-defaults-overwrite" style="accent-color:var(--accent)">
+          Overwrite existing
+        </label>
         <button class="btn btn-p btn-sm" id="req-defaults-save">Save Defaults</button>
       </div>
     </div>
@@ -38,8 +43,8 @@
       <span id="req-defaults-result" style="font-size:12px;color:var(--muted);"></span>
     </div>
     <div class="tw"><table>
-      <thead><tr><th>AY Category ID</th><th>AY Group ID</th><th>AY Group Name</th><th>Default AY ID</th><th>Default Label</th></tr></thead>
-      <tbody id="req-defaults-body"><tr><td colspan="5" class="loading"><span class="spin">⟳</span> Loading...</td></tr></tbody>
+      <thead><tr><th>AY Category ID</th><th>AY Group ID</th><th>AY Group Name</th><th>Default AY ID</th><th>Default Label</th><th>Dropdown</th></tr></thead>
+      <tbody id="req-defaults-body"><tr><td colspan="6" class="loading"><span class="spin">⟳</span> Loading...</td></tr></tbody>
     </table></div>
   </div>
 </div>

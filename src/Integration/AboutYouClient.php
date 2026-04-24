@@ -38,9 +38,13 @@ final class AboutYouClient
 
         if (filter_var($_ENV['AY_AUTO_PUBLISH'] ?? true, FILTER_VALIDATE_BOOLEAN)) {
             $styleKeys = [];
-            foreach ($variants as $variant) {
-                if (!empty($variant['style_key'])) {
-                    $styleKeys[$variant['style_key']] = true;
+            foreach ($this->extractSuccessfulRequests($result) as $requestItem) {
+                if (!is_array($requestItem)) {
+                    continue;
+                }
+                $styleKey = trim((string) ($requestItem['style_key'] ?? ''));
+                if ($styleKey !== '') {
+                    $styleKeys[$styleKey] = true;
                 }
             }
             if ($styleKeys !== []) {
@@ -185,13 +189,58 @@ final class AboutYouClient
         return $results;
     }
 
+    public function searchAttributeOptionsByGroupId(int $categoryId, int $groupId, ?string $query = null): array
+    {
+        if ($categoryId <= 0 || $groupId <= 0) {
+            return [];
+        }
+        $groups = $this->getCategoryAttributeGroups($categoryId);
+        $needle = strtolower(trim((string) $query));
+        $results = [];
+
+        foreach ($groups as $group) {
+            if ((int) ($group['id'] ?? 0) !== $groupId) {
+                continue;
+            }
+            $groupName = (string) ($group['name'] ?? '');
+            foreach (($group['values'] ?? []) as $value) {
+                $label = trim((string) ($value['label'] ?? $value['name'] ?? ''));
+                if ($label === '') {
+                    continue;
+                }
+                if ($needle !== '' && !str_contains(strtolower($label), $needle)) {
+                    continue;
+                }
+                $results[] = [
+                    'id' => (int) ($value['id'] ?? 0),
+                    'label' => $label,
+                    'group_name' => $groupName,
+                ];
+            }
+            break;
+        }
+        usort($results, static fn (array $a, array $b): int => $a['label'] <=> $b['label']);
+        return $results;
+    }
+
+    /**
+     * @return list<array{id:int,name:string,key:string,default_ay_id:int,values:list<array{id:int,label:string}>}>
+     */
+    public function listCategoryAttributeGroups(int $categoryId): array
+    {
+        if ($categoryId <= 0) {
+            return [];
+        }
+        return $this->getCategoryAttributeGroups($categoryId);
+    }
+
     public function getRequiredCategoryMetadata(int $categoryId): array
     {
         $groups = $this->getCategoryAttributeGroups($categoryId);
         $requiredGroups = [];
         $requiredTextFields = [];
         $assumeRequiredWhenMissingFlag = filter_var(
-            $_ENV['AY_ASSUME_CATEGORY_GROUPS_REQUIRED'] ?? true,
+            $_ENV['AY_ASSUME_CATEGORY_GROUPS_REQUIRED'] ?? false,
             FILTER_VALIDATE_BOOLEAN
         );
         foreach ($groups as $group) {
@@ -417,6 +466,30 @@ final class AboutYouClient
         }
 
         return $normalized;
+    }
+
+    /**
+     * @return list<array<string,mixed>>
+     */
+    private function extractSuccessfulRequests(array $result): array
+    {
+        $items = $result['items'] ?? [];
+        $requests = [];
+        foreach ($items as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $errors = $item['errors'] ?? [];
+            $success = (bool) ($item['success'] ?? empty($errors));
+            if (!$success) {
+                continue;
+            }
+            $request = $item['requestItem'] ?? $item['request_item'] ?? null;
+            if (is_array($request)) {
+                $requests[] = $request;
+            }
+        }
+        return $requests;
     }
 
     private function request(string $method, string $path, array $query = [], array|string|null $body = null): array

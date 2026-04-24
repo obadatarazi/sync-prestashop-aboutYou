@@ -37,12 +37,10 @@ final class ImageNormalizer
         $srcWidth = imagesx($src);
         $srcHeight = imagesy($src);
         if ($srcWidth <= 0 || $srcHeight <= 0) {
-            imagedestroy($src);
             return null;
         }
 
         if (!is_dir($this->targetDir) && !@mkdir($concurrentDirectory = $this->targetDir, 0775, true) && !is_dir($concurrentDirectory)) {
-            imagedestroy($src);
             throw new \RuntimeException('Could not create image target directory: ' . $this->targetDir);
         }
 
@@ -73,9 +71,6 @@ final class ImageNormalizer
         $filename = $hash . '.jpg';
         $absolutePath = rtrim($this->targetDir, '/') . '/' . $filename;
         imagejpeg($canvas, $absolutePath, max(60, min(100, $this->jpegQuality)));
-
-        imagedestroy($canvas);
-        imagedestroy($src);
 
         if (!file_exists($absolutePath)) {
             return null;

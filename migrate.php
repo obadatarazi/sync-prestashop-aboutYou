@@ -138,6 +138,8 @@ function applyPostSchemaAdjustments(PDO $pdo): void {
     ensureColumn($pdo, 'products', 'export_description', "ALTER TABLE products ADD COLUMN export_description TEXT NULL AFTER export_title");
     ensureColumn($pdo, 'products', 'export_material_composition', "ALTER TABLE products ADD COLUMN export_material_composition TEXT NULL AFTER export_description");
     ensureColumn($pdo, 'products', 'ps_api_payload', "ALTER TABLE products ADD COLUMN ps_api_payload LONGTEXT NULL AFTER export_material_composition");
+    ensureColumn($pdo, 'products', 'ay_manual_required_attributes_json', "ALTER TABLE products ADD COLUMN ay_manual_required_attributes_json LONGTEXT NULL AFTER ps_api_payload");
+    ensureColumn($pdo, 'products', 'ay_missing_payload_json', "ALTER TABLE products ADD COLUMN ay_missing_payload_json LONGTEXT NULL AFTER ay_manual_required_attributes_json");
     ensureColumn($pdo, 'orders', 'shipping_country_iso', "ALTER TABLE orders ADD COLUMN shipping_country_iso CHAR(2) NULL AFTER currency");
     ensureColumn($pdo, 'orders', 'discount_total', "ALTER TABLE orders ADD COLUMN discount_total DECIMAL(10,2) NULL AFTER total_shipping");
     ensureColumn($pdo, 'orders', 'billing_country_iso', "ALTER TABLE orders ADD COLUMN billing_country_iso CHAR(2) NULL AFTER shipping_country_iso");

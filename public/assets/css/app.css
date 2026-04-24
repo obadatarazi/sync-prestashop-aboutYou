@@ -136,6 +136,21 @@ select.fi option{background:var(--surface)}
 .modal-sub{font-size:11.5px;color:var(--muted)}
 .modal-body{padding:12px 14px;overflow:auto}
 .modal-list{display:flex;flex-direction:column;gap:8px}
+/* DRAWER */
+.drawer-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:170}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(460px,100vw);background:var(--surface);border-left:1px solid var(--border);box-shadow:var(--shadow-lg);z-index:181;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .22s ease}
+.drawer.open{transform:translateX(0)}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--border);gap:10px}
+.drawer-body{padding:12px 14px;overflow:auto;display:flex;flex-direction:column;gap:8px}
+.drawer-foot{padding:12px 14px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
+.drawer-option{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);cursor:pointer}
+.drawer-option.active{border-color:var(--accent);background:var(--accent-soft)}
+.drawer-option-title{font-size:12px;color:var(--text);line-height:1.35}
+.drawer-option-meta{font-size:11px;color:var(--muted);margin-top:4px}
+.path-chip-wrap{display:flex;flex-wrap:wrap;gap:3px;max-width:100%}
+.path-chip{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;border:1px solid rgba(15,23,42,.16);background:#f6f7fb;font-size:11px;font-weight:600;color:#6b7280;line-height:1.15}
+.path-chip.leaf{color:#111827;font-weight:700;border-color:rgba(15,23,42,.28);background:#ffffff}
+.path-chip.current{border-color:var(--accent);background:rgba(59,99,230,.10);color:var(--accent2)}
 /* STEP */
 .step{display:flex;gap:12px;align-items:flex-start;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:border-color .14s}
 .step:hover{border-color:var(--border2)}.step.done{border-color:rgba(21,128,61,.28)}

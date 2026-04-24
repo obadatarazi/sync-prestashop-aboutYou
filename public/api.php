@@ -100,6 +100,221 @@ function new_csrf(): string
     return $t;
 }
 
+function parse_json_setting(string $key, mixed $fallback = []): mixed
+{
+    $raw = (string) (Database::fetchValue("SELECT value FROM settings WHERE `key` = ?", [$key]) ?? '');
+    if ($raw === '') {
+        return $fallback;
+    }
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : $fallback;
+}
+
+/**
+ * @return array<int,string>
+ */
+function ay_category_path_cache(): array
+{
+    $byId = [];
+    $map = parse_json_setting('ay_category_map', []);
+    if (is_array($map)) {
+        foreach ($map as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $id = (int) ($entry['id'] ?? 0);
+            $path = trim((string) ($entry['path'] ?? ''));
+            if ($id > 0 && $path !== '') {
+                $byId[$id] = $path;
+            }
+        }
+    }
+
+    $cache = parse_json_setting('ay_category_path_cache', []);
+    if (is_array($cache)) {
+        foreach ($cache as $id => $path) {
+            $idNum = (int) $id;
+            $pathText = trim((string) $path);
+            if ($idNum > 0 && $pathText !== '') {
+                $byId[$idNum] = $pathText;
+            }
+        }
+    }
+
+    return $byId;
+}
+
+function remember_ay_category_path(int $ayCategoryId, string $ayCategoryPath): void
+{
+    $path = trim($ayCategoryPath);
+    if ($ayCategoryId <= 0 || $path === '') {
+        return;
+    }
+    $cache = parse_json_setting('ay_category_path_cache', []);
+    if (!is_array($cache)) {
+        $cache = [];
+    }
+    $cache[(string) $ayCategoryId] = $path;
+    $json = json_encode($cache, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    Database::execute(
+        "INSERT INTO settings (`key`, `value`, `type`, label, group_name)
+         VALUES ('ay_category_path_cache', ?, 'json', 'AY Category Path Cache JSON', 'aboutyou')
+         ON DUPLICATE KEY UPDATE `value`=VALUES(`value`), updated_at=NOW()",
+        [$json]
+    );
+}
+
+function attach_ay_category_paths(array $result): array
+{
+    if (!isset($result['rows']) || !is_array($result['rows'])) {
+        return $result;
+    }
+    $paths = ay_category_path_cache();
+    $result['rows'] = array_map(static function (array $row) use ($paths): array {
+        $id = (int) ($row['ay_category_id'] ?? 0);
+        $row['ay_category_path'] = $id > 0 ? ($paths[$id] ?? null) : null;
+        return $row;
+    }, $result['rows']);
+    return $result;
+}
+
+/**
+ * @return array<int, array{id:int, parent_id:int, name:string, path:string}>
+ */
+function build_ps_category_path_cache(): array
+{
+    $cacheRaw = parse_json_setting('ps_category_path_cache', []);
+    $freshUntil = (int) (parse_json_setting('ps_category_path_cache_fresh_until', ['ts' => 0])['ts'] ?? 0);
+    if (is_array($cacheRaw) && $cacheRaw !== [] && $freshUntil > time()) {
+        $normalized = [];
+        foreach ($cacheRaw as $id => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $idNum = (int) $id;
+            if ($idNum <= 0) {
+                continue;
+            }
+            $normalized[$idNum] = [
+                'id' => $idNum,
+                'parent_id' => (int) ($row['parent_id'] ?? 0),
+                'name' => (string) ($row['name'] ?? ''),
+                'path' => (string) ($row['path'] ?? ''),
+            ];
+        }
+        if ($normalized !== []) {
+            return $normalized;
+        }
+    }
+
+    $http = new HttpClient(
+        (int) ($_ENV['PS_HTTP_TIMEOUT'] ?? 15),
+        (int) ($_ENV['PS_HTTP_CONNECT_TIMEOUT'] ?? 8),
+    );
+    $ps = new PrestaShopClient($http);
+    $categories = $ps->getAllCategories();
+    $base = [];
+    foreach ($categories as $category) {
+        if (!is_array($category)) {
+            continue;
+        }
+        $id = (int) ($category['id'] ?? 0);
+        if ($id <= 0) {
+            continue;
+        }
+        $base[$id] = [
+            'id' => $id,
+            'parent_id' => (int) ($category['id_parent'] ?? 0),
+            'name' => extract_lang_value($category['name'] ?? ''),
+        ];
+    }
+
+    $resolved = [];
+    $resolver = static function (int $id) use (&$resolver, &$resolved, $base): string {
+        if (isset($resolved[$id])) {
+            return (string) ($resolved[$id]['path'] ?? '');
+        }
+        if (!isset($base[$id])) {
+            return '';
+        }
+        $node = $base[$id];
+        $name = trim((string) ($node['name'] ?? ''));
+        $parentId = (int) ($node['parent_id'] ?? 0);
+        $parentPath = ($parentId > 0 && $parentId !== $id) ? $resolver($parentId) : '';
+        $path = $parentPath !== '' ? ($parentPath . ' / ' . $name) : $name;
+        $resolved[$id] = [
+            'id' => $id,
+            'parent_id' => $parentId,
+            'name' => $name,
+            'path' => $path,
+        ];
+        return $path;
+    };
+
+    foreach (array_keys($base) as $id) {
+        $resolver((int) $id);
+    }
+
+    Database::execute(
+        "INSERT INTO settings (`key`, `value`, `type`, label, group_name)
+         VALUES ('ps_category_path_cache', ?, 'json', 'PS Category Path Cache JSON', 'prestashop')
+         ON DUPLICATE KEY UPDATE `value`=VALUES(`value`), updated_at=NOW()",
+        [json_encode($resolved, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)]
+    );
+    Database::execute(
+        "INSERT INTO settings (`key`, `value`, `type`, label, group_name)
+         VALUES ('ps_category_path_cache_fresh_until', ?, 'json', 'PS Category Path Cache Fresh TTL', 'prestashop')
+         ON DUPLICATE KEY UPDATE `value`=VALUES(`value`), updated_at=NOW()",
+        [json_encode(['ts' => time() + 3600], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)]
+    );
+
+    return $resolved;
+}
+
+function ensure_ay_categories_cache_table(): void
+{
+    Database::execute(
+        "CREATE TABLE IF NOT EXISTS ay_categories_cache (
+            ay_category_id INT UNSIGNED NOT NULL PRIMARY KEY,
+            name VARCHAR(255) NULL,
+            path VARCHAR(1024) NULL,
+            path_lc VARCHAR(1024) NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_path_lc (path_lc(255)),
+            INDEX idx_name (name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    );
+}
+
+function ay_gender_matches(string $pathOrName, string $filter): bool
+{
+    $selected = strtolower(trim($filter));
+    if ($selected === '') {
+        return true;
+    }
+    $text = strtolower($pathOrName);
+    $parts = preg_split('/[^a-z0-9]+/', $text) ?: [];
+    $tokens = array_values(array_filter(array_map('trim', $parts), static fn (string $v): bool => $v !== ''));
+    if ($tokens === []) {
+        return false;
+    }
+    $tokenMap = array_fill_keys($tokens, true);
+    $hasAny = static function (array $candidates) use ($tokenMap): bool {
+        foreach ($candidates as $candidate) {
+            if (!empty($tokenMap[$candidate])) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return match ($selected) {
+        'women' => $hasAny(['women', 'woman', 'damen', 'frau', 'female', 'ladies']),
+        'men' => $hasAny(['men', 'man', 'herren', 'herr', 'male', 'gentlemen']),
+        'kids' => $hasAny(['kids', 'kid', 'children', 'child', 'kinder', 'boys', 'boy', 'girls', 'girl', 'junior']),
+        default => true,
+    };
+}
+
 function product_detail_remote_cache_ttl(): int
 {
     $ttl = (int) ($_ENV['PRODUCT_DETAIL_REMOTE_CACHE_TTL'] ?? 90);
@@ -286,7 +501,133 @@ if ($action === 'products') {
         'status' => $input['status'] ?? '',
         'search' => $input['search'] ?? '',
     ]);
-    json_out(200, ['ok' => true, 'data' => $result]);
+    json_out(200, ['ok' => true, 'data' => attach_ay_category_paths($result)]);
+}
+
+if ($action === 'products_export_csv') {
+    require_csrf($input);
+
+    $status = strtolower(trim((string) ($input['status'] ?? '')));
+    $search = trim((string) ($input['search'] ?? ''));
+    $selectedPsIdsRaw = $input['ps_product_ids'] ?? [];
+    if (!in_array($status, ['', 'synced', 'pending', 'error', 'compare'], true)) {
+        json_out(400, ['ok' => false, 'error' => 'Invalid status filter']);
+    }
+
+    $selectedPsIds = [];
+    if (is_array($selectedPsIdsRaw)) {
+        foreach ($selectedPsIdsRaw as $psId) {
+            $psIdInt = (int) $psId;
+            if ($psIdInt > 0) {
+                $selectedPsIds[$psIdInt] = true;
+            }
+        }
+    }
+    $selectedPsIds = array_keys($selectedPsIds);
+
+    $where = [];
+    $params = [];
+    if ($selectedPsIds !== []) {
+        $placeholders = implode(',', array_fill(0, count($selectedPsIds), '?'));
+        $where[] = "p.ps_id IN ({$placeholders})";
+        foreach ($selectedPsIds as $psId) {
+            $params[] = $psId;
+        }
+    }
+    if (in_array($status, ['synced', 'pending', 'error'], true)) {
+        $where[] = 'p.sync_status = ?';
+        $params[] = $status;
+    }
+    if ($search !== '') {
+        $where[] = '(p.name LIKE ? OR p.reference LIKE ? OR CAST(p.ps_id AS CHAR) LIKE ?)';
+        $needle = '%' . $search . '%';
+        $params[] = $needle;
+        $params[] = $needle;
+        $params[] = $needle;
+    }
+
+    $sql = "SELECT p.* FROM products p";
+    if ($where !== []) {
+        $sql .= ' WHERE ' . implode(' AND ', $where);
+    }
+    $sql .= ' ORDER BY p.ps_id ASC';
+
+    $products = Database::fetchAll($sql, $params);
+    $repo = new ProductRepository();
+    $mapper = new \SyncBridge\Integration\AboutYouMapper();
+
+    $reportsDir = __DIR__ . '/../reports';
+    if (!is_dir($reportsDir) && !mkdir($reportsDir, 0777, true) && !is_dir($reportsDir)) {
+        json_out(500, ['ok' => false, 'error' => 'Could not create reports directory']);
+    }
+
+    $fileName = 'product_export_' . date('Ymd_His') . '.csv';
+    $filePath = $reportsDir . '/' . $fileName;
+    $fp = fopen($filePath, 'wb');
+    if ($fp === false) {
+        json_out(500, ['ok' => false, 'error' => 'Could not create export file']);
+    }
+
+    fputcsv($fp, [
+        'ps_id',
+        'reference',
+        'name',
+        'ay_style_key',
+        'ay_category_id',
+        'ay_brand_id',
+        'sync_status',
+        'variant_count',
+        'image_count',
+        'payload_json',
+        'payload_error',
+    ]);
+
+    foreach ($products as $product) {
+        $productId = (int) ($product['id'] ?? 0);
+        $variants = $productId > 0 ? $repo->getVariants($productId) : [];
+        $images = $productId > 0 ? $repo->getImages($productId) : [];
+        $imageUrls = array_values(array_filter(array_map(
+            static function (array $image): string {
+                $publicUrl = trim((string) ($image['public_url'] ?? ''));
+                if ($publicUrl !== '') {
+                    return $publicUrl;
+                }
+                return trim((string) ($image['source_url'] ?? ''));
+            },
+            $images
+        )));
+
+        $payload = null;
+        $payloadError = '';
+        try {
+            $payload = $mapper->mapProductToAy($product, $variants, $imageUrls, (string) ($product['category_name'] ?? ''));
+        } catch (\Throwable $e) {
+            $payloadError = $e->getMessage();
+        }
+
+        fputcsv($fp, [
+            (int) ($product['ps_id'] ?? 0),
+            (string) ($product['reference'] ?? ''),
+            (string) ($product['name'] ?? ''),
+            (string) ($product['ay_style_key'] ?? ''),
+            (int) ($product['ay_category_id'] ?? 0),
+            (int) ($product['ay_brand_id'] ?? 0),
+            (string) ($product['sync_status'] ?? ''),
+            count($variants),
+            count($imageUrls),
+            $payload !== null ? json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '',
+            $payloadError,
+        ]);
+    }
+
+    fclose($fp);
+
+    json_out(200, ['ok' => true, 'data' => [
+        'file' => $filePath,
+        'file_name' => $fileName,
+        'count' => count($products),
+        'selected_count' => count($selectedPsIds),
+    ]]);
 }
 
 if ($action === 'products_compare') {
@@ -301,7 +642,231 @@ if ($action === 'products_compare') {
         'bucket' => $bucket,
         'search' => $input['search'] ?? '',
     ]);
-    json_out(200, ['ok' => true, 'data' => $result]);
+    json_out(200, ['ok' => true, 'data' => attach_ay_category_paths($result)]);
+}
+
+if ($action === 'ps_category_path') {
+    $psCategoryId = (int) ($input['ps_category_id'] ?? 0);
+    if ($psCategoryId <= 0) {
+        json_out(400, ['ok' => false, 'error' => 'ps_category_id required']);
+    }
+    try {
+        $cache = build_ps_category_path_cache();
+        $row = $cache[$psCategoryId] ?? null;
+        if (!$row) {
+            json_out(404, ['ok' => false, 'error' => 'PrestaShop category not found']);
+        }
+        json_out(200, ['ok' => true, 'data' => [
+            'id' => (int) ($row['id'] ?? 0),
+            'name' => (string) ($row['name'] ?? ''),
+            'path' => (string) ($row['path'] ?? ''),
+        ]]);
+    } catch (\Throwable $e) {
+        json_out(500, ['ok' => false, 'error' => $e->getMessage()]);
+    }
+}
+
+if ($action === 'ps_product_categories') {
+    $psId = (int) ($input['ps_id'] ?? 0);
+    if ($psId <= 0) {
+        json_out(400, ['ok' => false, 'error' => 'ps_id required']);
+    }
+    try {
+        $http = new HttpClient(
+            (int) ($_ENV['PS_HTTP_TIMEOUT'] ?? 15),
+            (int) ($_ENV['PS_HTTP_CONNECT_TIMEOUT'] ?? 8),
+        );
+        $ps = new PrestaShopClient($http);
+        $psProduct = $ps->getProduct($psId);
+        if (!is_array($psProduct)) {
+            json_out(404, ['ok' => false, 'error' => 'Product not found on PrestaShop']);
+        }
+
+        $ids = [];
+        $defaultId = (int) ($psProduct['id_category_default'] ?? 0);
+        if ($defaultId > 0) {
+            $ids[$defaultId] = true;
+        }
+        $categories = $psProduct['associations']['categories'] ?? [];
+        if (isset($categories['category'])) {
+            $categories = $categories['category'];
+        }
+        if (isset($categories['id'])) {
+            $categories = [$categories];
+        }
+        if (is_array($categories)) {
+            foreach ($categories as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $id = (int) ($row['id'] ?? 0);
+                if ($id > 0) {
+                    $ids[$id] = true;
+                }
+            }
+        }
+
+        $pathCache = build_ps_category_path_cache();
+        $items = [];
+        foreach (array_keys($ids) as $id) {
+            $pathRow = $pathCache[(int) $id] ?? null;
+            $items[] = [
+                'id' => (int) $id,
+                'name' => (string) ($pathRow['name'] ?? ''),
+                'path' => (string) ($pathRow['path'] ?? ''),
+                'is_default' => (int) $id === $defaultId,
+            ];
+        }
+        usort($items, static fn (array $a, array $b): int => strcmp((string) ($a['path'] ?? ''), (string) ($b['path'] ?? '')));
+
+        json_out(200, ['ok' => true, 'data' => [
+            'ps_id' => $psId,
+            'default_category_id' => $defaultId,
+            'items' => $items,
+        ]]);
+    } catch (\Throwable $e) {
+        json_out(500, ['ok' => false, 'error' => $e->getMessage()]);
+    }
+}
+
+if ($action === 'ay_category_suggest_for_product') {
+    $psId = (int) ($input['ps_id'] ?? 0);
+    $genderFilter = strtolower(trim((string) ($input['gender_filter'] ?? '')));
+    if ($psId <= 0) {
+        json_out(400, ['ok' => false, 'error' => 'ps_id required']);
+    }
+    try {
+        ensure_ay_categories_cache_table();
+        $product = Database::fetchOne(
+            "SELECT ps_id, name, description_short, description, category_name, category_ps_id
+             FROM products
+             WHERE ps_id = ?
+             LIMIT 1",
+            [$psId]
+        );
+        if (!is_array($product)) {
+            json_out(404, ['ok' => false, 'error' => 'Product not found']);
+        }
+
+        $psCategoryPaths = [];
+        try {
+            $http = new HttpClient(
+                (int) ($_ENV['PS_HTTP_TIMEOUT'] ?? 15),
+                (int) ($_ENV['PS_HTTP_CONNECT_TIMEOUT'] ?? 8),
+            );
+            $ps = new PrestaShopClient($http);
+            $psProduct = $ps->getProduct($psId);
+            $pathCache = build_ps_category_path_cache();
+            $ids = [];
+            $defaultId = (int) ($psProduct['id_category_default'] ?? $product['category_ps_id'] ?? 0);
+            if ($defaultId > 0) {
+                $ids[$defaultId] = true;
+            }
+            $categories = $psProduct['associations']['categories'] ?? [];
+            if (isset($categories['category'])) {
+                $categories = $categories['category'];
+            }
+            if (isset($categories['id'])) {
+                $categories = [$categories];
+            }
+            if (is_array($categories)) {
+                foreach ($categories as $row) {
+                    if (!is_array($row)) {
+                        continue;
+                    }
+                    $id = (int) ($row['id'] ?? 0);
+                    if ($id > 0) {
+                        $ids[$id] = true;
+                    }
+                }
+            }
+            foreach (array_keys($ids) as $id) {
+                $path = trim((string) ($pathCache[(int) $id]['path'] ?? ''));
+                if ($path !== '') {
+                    $psCategoryPaths[] = $path;
+                }
+            }
+        } catch (\Throwable) {
+            // suggestion can continue from product text only
+        }
+
+        $productText = trim(implode(' ', array_filter([
+            (string) ($product['name'] ?? ''),
+            (string) ($product['description_short'] ?? ''),
+            (string) ($product['description'] ?? ''),
+            (string) ($product['category_name'] ?? ''),
+            implode(' ', $psCategoryPaths),
+        ])));
+        if ($productText === '') {
+            json_out(200, ['ok' => true, 'data' => ['suggested' => null, 'confidence' => 0.0]]);
+        }
+
+        $tokens = array_values(array_unique(array_filter(preg_split('/[^a-z0-9]+/i', strtolower($productText)) ?: [], static fn (string $t): bool => strlen($t) >= 3)));
+        if ($tokens === []) {
+            json_out(200, ['ok' => true, 'data' => ['suggested' => null, 'confidence' => 0.0]]);
+        }
+
+        $rows = Database::fetchAll(
+            "SELECT ay_category_id AS id, name, path
+             FROM ay_categories_cache
+             ORDER BY updated_at DESC
+             LIMIT 5000"
+        );
+        if ($rows === []) {
+            json_out(200, ['ok' => true, 'data' => ['suggested' => null, 'confidence' => 0.0]]);
+        }
+
+        $scored = [];
+        foreach ($rows as $row) {
+            $path = strtolower(trim((string) ($row['path'] ?? $row['name'] ?? '')));
+            if ($path === '') {
+                continue;
+            }
+            if ($genderFilter !== '' && !ay_gender_matches($path, $genderFilter)) {
+                continue;
+            }
+            $score = 0;
+            $matched = 0;
+            foreach ($tokens as $token) {
+                if (str_contains($path, $token)) {
+                    $score += min(4, strlen($token) >= 6 ? 3 : 2);
+                    $matched++;
+                }
+            }
+            if ($matched === 0) {
+                continue;
+            }
+            // Extra boost when category leaf resembles explicit product type terms.
+            $leaf = strtolower(trim((string) preg_replace('/^.*[\/|>]/', '', $path)));
+            if ($leaf !== '' && str_contains(strtolower($productText), $leaf)) {
+                $score += 5;
+            }
+            $scored[] = [
+                'id' => (int) ($row['id'] ?? 0),
+                'path' => (string) ($row['path'] ?? $row['name'] ?? ''),
+                'score' => $score,
+                'matched' => $matched,
+            ];
+        }
+
+        if ($scored === []) {
+            json_out(200, ['ok' => true, 'data' => ['suggested' => null, 'confidence' => 0.0]]);
+        }
+
+        usort($scored, static fn (array $a, array $b): int => [$b['score'], $b['matched']] <=> [$a['score'], $a['matched']]);
+        $best = $scored[0];
+        $confidence = min(0.95, max(0.35, (($best['score'] ?? 0) / 20)));
+        json_out(200, ['ok' => true, 'data' => [
+            'suggested' => [
+                'id' => (int) ($best['id'] ?? 0),
+                'path' => (string) ($best['path'] ?? ''),
+            ],
+            'confidence' => round($confidence, 2),
+            'tokens_used' => count($tokens),
+        ]]);
+    } catch (\Throwable $e) {
+        json_out(500, ['ok' => false, 'error' => $e->getMessage()]);
+    }
 }
 
 if ($action === 'products_recheck_ay') {
@@ -423,11 +988,27 @@ if ($action === 'product_save') {
     }
 
     $psApiPayloadRaw = trim((string) ($input['ps_api_payload'] ?? ''));
+    $manualRequiredRaw = trim((string) ($input['ay_manual_required_attributes_json'] ?? ''));
     if ($psApiPayloadRaw !== '') {
         try {
             json_decode($psApiPayloadRaw, true, 512, JSON_THROW_ON_ERROR);
         } catch (\Throwable $e) {
             json_out(422, ['ok' => false, 'error' => 'Invalid ps_api_payload JSON: ' . $e->getMessage()]);
+        }
+    }
+    if ($manualRequiredRaw !== '') {
+        try {
+            $decoded = json_decode($manualRequiredRaw, true, 512, JSON_THROW_ON_ERROR);
+            if (!is_array($decoded)) {
+                json_out(422, ['ok' => false, 'error' => 'ay_manual_required_attributes_json must be a JSON object map {group_id: ay_id}']);
+            }
+            foreach ($decoded as $groupId => $ayId) {
+                if ((int) $groupId <= 0 || (int) $ayId <= 0) {
+                    json_out(422, ['ok' => false, 'error' => 'ay_manual_required_attributes_json must only contain positive integer group_id => ay_id entries']);
+                }
+            }
+        } catch (\Throwable $e) {
+            json_out(422, ['ok' => false, 'error' => 'Invalid ay_manual_required_attributes_json: ' . $e->getMessage()]);
         }
     }
 
@@ -436,12 +1017,50 @@ if ($action === 'product_save') {
         'export_description' => $input['export_description'] ?? null,
         'export_material_composition' => $input['export_material_composition'] ?? null,
         'ps_api_payload' => $psApiPayloadRaw !== '' ? $psApiPayloadRaw : null,
+        'ay_manual_required_attributes_json' => $manualRequiredRaw !== '' ? $manualRequiredRaw : null,
         'ay_category_id' => $input['ay_category_id'] ?? null,
         'ay_brand_id' => $input['ay_brand_id'] ?? null,
     ]);
     clear_product_detail_remote_cache($psId);
 
     json_out(200, ['ok' => true, 'data' => build_product_detail_payload($psId)]);
+}
+
+if ($action === 'ay_attribute_options_by_group') {
+    $psId = (int) ($input['product_id'] ?? 0);
+    $groupId = (int) ($input['group_id'] ?? 0);
+    $query = trim((string) ($input['query'] ?? ''));
+    if ($psId <= 0) {
+        json_out(400, ['ok' => false, 'error' => 'product_id required']);
+    }
+    if ($groupId <= 0) {
+        json_out(400, ['ok' => false, 'error' => 'group_id required']);
+    }
+    $repo = new ProductRepository();
+    $product = $repo->findByPsId($psId);
+    if (!$product) {
+        json_out(404, ['ok' => false, 'error' => 'Product not found']);
+    }
+    $effectiveCategoryId = resolve_product_category_id((array) $product, null);
+    if ($effectiveCategoryId <= 0) {
+        json_out(422, ['ok' => false, 'error' => 'No effective AY category configured for this product']);
+    }
+    try {
+        $http = new HttpClient(
+            (int) ($_ENV['AY_HTTP_TIMEOUT'] ?? 15),
+            (int) ($_ENV['AY_HTTP_CONNECT_TIMEOUT'] ?? 8),
+        );
+        $ay = new AboutYouClient($http);
+        $items = $ay->searchAttributeOptionsByGroupId($effectiveCategoryId, $groupId, $query);
+        json_out(200, ['ok' => true, 'data' => [
+            'product_id' => $psId,
+            'category_id' => $effectiveCategoryId,
+            'group_id' => $groupId,
+            'items' => $items,
+        ]]);
+    } catch (\Throwable $e) {
+        json_out(500, ['ok' => false, 'error' => 'Could not load AY group options: ' . $e->getMessage()]);
+    }
 }
 
 if ($action === 'product_variant_eans_save') {
@@ -490,6 +1109,7 @@ if ($action === 'product_map_attributes_save') {
     }
 
     $saved = 0;
+    $deleted = 0;
     Database::beginTransaction();
     try {
         foreach ($mappings as $item) {
@@ -502,7 +1122,25 @@ if ($action === 'product_map_attributes_save') {
             $ayGroupId = (int) ($item['ay_group_id'] ?? 0);
             $ayGroupName = trim((string) ($item['ay_group_name'] ?? ''));
             if (!in_array($type, ['color', 'size', 'second_size', 'attribute', 'attribute_required'], true)
-                || $psLabel === '' || $ayId <= 0) {
+                || $psLabel === '') {
+                continue;
+            }
+
+            if ($ayId <= 0) {
+                if ($ayGroupId > 0) {
+                    Database::execute(
+                        "DELETE FROM attribute_maps
+                         WHERE map_type = ? AND LOWER(ps_label) = LOWER(?) AND ay_group_id = ?",
+                        [$type, $psLabel, $ayGroupId]
+                    );
+                } else {
+                    Database::execute(
+                        "DELETE FROM attribute_maps
+                         WHERE map_type = ? AND LOWER(ps_label) = LOWER(?) AND ay_group_id = 0",
+                        [$type, $psLabel]
+                    );
+                }
+                $deleted++;
                 continue;
             }
 
@@ -520,7 +1158,7 @@ if ($action === 'product_map_attributes_save') {
         json_out(500, ['ok' => false, 'error' => $e->getMessage()]);
     }
 
-    json_out(200, ['ok' => true, 'data' => ['saved' => $saved]]);
+    json_out(200, ['ok' => true, 'data' => ['saved' => $saved, 'deleted' => $deleted]]);
 }
 
 if ($action === 'product_auto_map_attributes') {
@@ -942,15 +1580,22 @@ if ($action === 'image_retry_failed') {
         json_out(404, ['ok' => false, 'error' => 'Product not found']);
     }
 
-    $failedImages = Database::fetchAll(
-        "SELECT id, source_url FROM product_images WHERE product_id = ? AND status = 'error' ORDER BY position ASC, id ASC",
+    $retryImages = Database::fetchAll(
+        "SELECT id, source_url, status
+         FROM product_images
+         WHERE product_id = ? AND status IN ('error', 'pending')
+         ORDER BY position ASC, id ASC",
         [$productId]
     );
-    if ($failedImages === []) {
+    if ($retryImages === []) {
         json_out(200, ['ok' => true, 'data' => ['retried' => 0, 'ok' => 0, 'failed' => 0]]);
     }
 
-    $baseUrl = rtrim((string) ($_ENV['IMAGE_PUBLIC_BASE_URL'] ?? ''), '/');
+    $baseUrl = rtrim((string) (
+        $_ENV['IMAGE_NORMALIZE_PUBLIC_BASE_URL']
+        ?? $_ENV['IMAGE_PUBLIC_BASE_URL']
+        ?? ''
+    ), '/');
     if ($baseUrl === '') {
         $appUrl = rtrim((string) ($_ENV['APP_URL'] ?? ''), '/');
         if ($appUrl !== '') {
@@ -976,9 +1621,17 @@ if ($action === 'image_retry_failed') {
 
     $ok = 0;
     $failed = 0;
-    foreach ($failedImages as $img) {
+    $retriedPending = 0;
+    $retriedError = 0;
+    foreach ($retryImages as $img) {
         $imgId = (int) ($img['id'] ?? 0);
         $url = trim((string) ($img['source_url'] ?? ''));
+        $status = (string) ($img['status'] ?? '');
+        if ($status === 'pending') {
+            $retriedPending++;
+        } elseif ($status === 'error') {
+            $retriedError++;
+        }
         if ($imgId <= 0 || $url === '') {
             continue;
         }
@@ -999,7 +1652,9 @@ if ($action === 'image_retry_failed') {
     }
 
     json_out(200, ['ok' => true, 'data' => [
-        'retried' => count($failedImages),
+        'retried' => count($retryImages),
+        'retried_pending' => $retriedPending,
+        'retried_error' => $retriedError,
         'ok' => $ok,
         'failed' => $failed,
     ]]);
@@ -1088,6 +1743,7 @@ if ($action === 'product_assign_ay_category') {
     require_csrf($input);
     $psId = (int) ($input['ps_id'] ?? 0);
     $ayCategoryId = (int) ($input['ay_category_id'] ?? 0);
+    $ayCategoryPath = trim((string) ($input['ay_category_path'] ?? ''));
     if ($psId <= 0) {
         json_out(400, ['ok' => false, 'error' => 'ps_id required']);
     }
@@ -1098,7 +1754,67 @@ if ($action === 'product_assign_ay_category') {
         "UPDATE products SET ay_category_id = ?, updated_at = NOW() WHERE ps_id = ?",
         [$ayCategoryId, $psId]
     );
-    json_out(200, ['ok' => true, 'data' => ['ps_id' => $psId, 'ay_category_id' => $ayCategoryId]]);
+    remember_ay_category_path($ayCategoryId, $ayCategoryPath);
+    json_out(200, ['ok' => true, 'data' => [
+        'ps_id' => $psId,
+        'ay_category_id' => $ayCategoryId,
+        'ay_category_path' => $ayCategoryPath !== '' ? $ayCategoryPath : null,
+    ]]);
+}
+
+if ($action === 'product_assign_ay_category_bulk') {
+    require_csrf($input);
+    $psIdsRaw = $input['ps_ids'] ?? [];
+    $ayCategoryId = (int) ($input['ay_category_id'] ?? 0);
+    $ayCategoryPath = trim((string) ($input['ay_category_path'] ?? ''));
+    if (!is_array($psIdsRaw) || $psIdsRaw === []) {
+        json_out(400, ['ok' => false, 'error' => 'ps_ids must be a non-empty array']);
+    }
+    if ($ayCategoryId <= 0) {
+        json_out(400, ['ok' => false, 'error' => 'ay_category_id must be > 0']);
+    }
+    $psIds = array_values(array_unique(array_filter(array_map('intval', $psIdsRaw), static fn (int $id): bool => $id > 0)));
+    if ($psIds === []) {
+        json_out(400, ['ok' => false, 'error' => 'No valid product ids provided']);
+    }
+    if (count($psIds) > 500) {
+        json_out(400, ['ok' => false, 'error' => 'Maximum 500 products per bulk request']);
+    }
+
+    $placeholders = implode(',', array_fill(0, count($psIds), '?'));
+    $count = (int) Database::fetchValue(
+        "SELECT COUNT(*) FROM products WHERE ps_id IN ({$placeholders})",
+        $psIds
+    );
+    if ($count !== count($psIds)) {
+        json_out(404, ['ok' => false, 'error' => 'One or more product ids were not found']);
+    }
+
+    Database::beginTransaction();
+    try {
+        Database::execute(
+            "UPDATE products
+             SET ay_category_id = ?, updated_at = NOW()
+             WHERE ps_id IN ({$placeholders})",
+            array_merge([$ayCategoryId], $psIds)
+        );
+        Database::commit();
+    } catch (\Throwable $e) {
+        Database::rollback();
+        json_out(500, ['ok' => false, 'error' => $e->getMessage()]);
+    }
+
+    $updated = (int) Database::fetchValue(
+        "SELECT COUNT(*) FROM products WHERE ps_id IN ({$placeholders}) AND ay_category_id = ?",
+        array_merge($psIds, [$ayCategoryId])
+    );
+    remember_ay_category_path($ayCategoryId, $ayCategoryPath);
+    json_out(200, ['ok' => true, 'data' => [
+        'ay_category_id' => $ayCategoryId,
+        'ay_category_path' => $ayCategoryPath !== '' ? $ayCategoryPath : null,
+        'updated' => $updated,
+        'total' => count($psIds),
+    ]]);
 }
 
 if ($action === 'category_products_assign_ay_category') {
@@ -1366,6 +2082,122 @@ if ($action === 'ay_categories_search') {
     }
 }
 
+if ($action === 'ay_categories_catalog_sync') {
+    require_csrf($input);
+    try {
+        ensure_ay_categories_cache_table();
+        $http = new HttpClient(
+            (int) ($_ENV['AY_HTTP_TIMEOUT'] ?? 15),
+            (int) ($_ENV['AY_HTTP_CONNECT_TIMEOUT'] ?? 8),
+        );
+        $ay = new AboutYouClient($http);
+        $rowsById = [];
+        $maxPages = 250;
+        for ($page = 1; $page <= $maxPages; $page++) {
+            $payload = $ay->searchCategories(null, $page, 100);
+            $items = is_array($payload['items'] ?? null) ? $payload['items'] : [];
+            if ($items === []) {
+                break;
+            }
+            foreach ($items as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $id = (int) ($item['id'] ?? 0);
+                if ($id <= 0) {
+                    continue;
+                }
+                $name = trim((string) ($item['name'] ?? ''));
+                $path = trim((string) ($item['path'] ?? $name));
+                $rowsById[$id] = [
+                    'id' => $id,
+                    'name' => $name !== '' ? $name : $path,
+                    'path' => $path !== '' ? $path : $name,
+                ];
+            }
+            if (count($items) < 100) {
+                break;
+            }
+        }
+
+        Database::beginTransaction();
+        try {
+            Database::execute("TRUNCATE TABLE ay_categories_cache");
+            foreach ($rowsById as $row) {
+                $pathLc = strtolower((string) ($row['path'] ?? ''));
+                Database::execute(
+                    "INSERT INTO ay_categories_cache (ay_category_id, name, path, path_lc, updated_at)
+                     VALUES (?, ?, ?, ?, NOW())",
+                    [(int) $row['id'], (string) ($row['name'] ?? ''), (string) ($row['path'] ?? ''), $pathLc]
+                );
+            }
+            Database::commit();
+        } catch (\Throwable $e) {
+            Database::rollback();
+            throw $e;
+        }
+
+        json_out(200, ['ok' => true, 'data' => [
+            'synced' => count($rowsById),
+            'synced_at' => gmdate('c'),
+        ]]);
+    } catch (\Throwable $e) {
+        json_out(500, ['ok' => false, 'error' => $e->getMessage()]);
+    }
+}
+
+if ($action === 'ay_categories_catalog') {
+    try {
+        ensure_ay_categories_cache_table();
+        $query = strtolower(trim((string) ($input['query'] ?? '')));
+        $genderFilter = strtolower(trim((string) ($input['gender_filter'] ?? '')));
+        $limit = min(300, max(20, (int) ($input['limit'] ?? 120)));
+        // Pull a broad candidate set first, then apply local gender filtering to avoid
+        // bias from early limited slices (which can hide women/men/kids paths).
+        $candidateLimit = $query !== '' ? max(600, $limit * 6) : 5000;
+        $rows = [];
+        if ($query !== '') {
+            $like = '%' . $query . '%';
+            $rows = Database::fetchAll(
+                "SELECT ay_category_id AS id, name, path, updated_at
+                 FROM ay_categories_cache
+                 WHERE path_lc LIKE ? OR LOWER(name) LIKE ?
+                 ORDER BY path ASC
+                 LIMIT {$candidateLimit}",
+                [$like, $like]
+            );
+        } else {
+            $rows = Database::fetchAll(
+                "SELECT ay_category_id AS id, name, path, updated_at
+                 FROM ay_categories_cache
+                 ORDER BY path ASC
+                 LIMIT {$candidateLimit}"
+            );
+        }
+
+        if ($genderFilter !== '') {
+            $rows = array_values(array_filter($rows, static function (array $row) use ($genderFilter): bool {
+                $path = (string) ($row['path'] ?? $row['name'] ?? '');
+                return ay_gender_matches($path, $genderFilter);
+            }));
+        }
+        $rows = array_slice($rows, 0, $limit);
+
+        $lastSync = Database::fetchValue("SELECT MAX(updated_at) FROM ay_categories_cache");
+        json_out(200, ['ok' => true, 'data' => [
+            'items' => array_values(array_map(static fn (array $row): array => [
+                'id' => (int) ($row['id'] ?? 0),
+                'name' => (string) ($row['name'] ?? ''),
+                'path' => (string) ($row['path'] ?? ''),
+            ], $rows)),
+            'count' => count($rows),
+            'last_sync_at' => $lastSync ?: null,
+        ]]);
+    } catch (\Throwable $e) {
+        json_out(500, ['ok' => false, 'error' => $e->getMessage()]);
+    }
+}
+
 if ($action === 'attribute_mappings') {
     try {
         $http = new HttpClient(
@@ -1568,6 +2400,118 @@ if ($action === 'required_group_defaults_save') {
     }
 
     json_out(200, ['ok' => true, 'data' => ['saved' => $saved]]);
+}
+
+if ($action === 'required_group_default_options') {
+    $categoryId = (int) ($input['category_id'] ?? 0);
+    $groupId = (int) ($input['group_id'] ?? 0);
+    if ($categoryId <= 0 || $groupId <= 0) {
+        json_out(400, ['ok' => false, 'error' => 'category_id and group_id are required']);
+    }
+    try {
+        $http = new HttpClient(
+            (int) ($_ENV['AY_HTTP_TIMEOUT'] ?? 15),
+            (int) ($_ENV['AY_HTTP_CONNECT_TIMEOUT'] ?? 8),
+        );
+        $ay = new AboutYouClient($http);
+        $items = $ay->searchAttributeOptionsByGroupId($categoryId, $groupId, '');
+        json_out(200, ['ok' => true, 'data' => [
+            'category_id' => $categoryId,
+            'group_id' => $groupId,
+            'items' => $items,
+        ]]);
+    } catch (\Throwable $e) {
+        json_out(500, ['ok' => false, 'error' => 'Could not load AY group options: ' . $e->getMessage()]);
+    }
+}
+
+if ($action === 'required_group_defaults_autofill') {
+    require_csrf($input);
+    $categoryId = (int) ($input['category_id'] ?? 0);
+    $overwrite = filter_var($input['overwrite'] ?? false, FILTER_VALIDATE_BOOLEAN);
+    if ($categoryId <= 0) {
+        json_out(400, ['ok' => false, 'error' => 'category_id is required']);
+    }
+    try {
+        $http = new HttpClient(
+            (int) ($_ENV['AY_HTTP_TIMEOUT'] ?? 15),
+            (int) ($_ENV['AY_HTTP_CONNECT_TIMEOUT'] ?? 8),
+        );
+        $ay = new AboutYouClient($http);
+        $metadata = $ay->getRequiredCategoryMetadata($categoryId);
+        $requiredGroups = array_values(array_filter(
+            (array) ($metadata['required_groups'] ?? []),
+            static fn (mixed $g): bool => is_array($g) && (int) ($g['id'] ?? 0) > 0
+        ));
+
+        if ($requiredGroups === []) {
+            // AY metadata often omits explicit required flags; fallback to available groups.
+            $allGroups = $ay->listCategoryAttributeGroups($categoryId);
+            foreach ($allGroups as $group) {
+                $gid = (int) ($group['id'] ?? 0);
+                $values = (array) ($group['values'] ?? []);
+                if ($gid <= 0 || $values === []) {
+                    continue;
+                }
+                $requiredGroups[] = [
+                    'id' => $gid,
+                    'name' => (string) ($group['key'] ?? $group['name'] ?? ('group_' . $gid)),
+                ];
+            }
+        }
+
+        $saved = 0;
+        $skipped = 0;
+        Database::beginTransaction();
+        foreach ($requiredGroups as $group) {
+            $groupId = (int) ($group['id'] ?? 0);
+            if ($groupId <= 0) {
+                continue;
+            }
+            $groupName = trim((string) ($group['name'] ?? ('group_' . $groupId)));
+            if (!$overwrite) {
+                $existing = (int) (Database::fetchValue(
+                    "SELECT default_ay_id FROM ay_required_group_defaults WHERE ay_category_id = ? AND ay_group_id = ? LIMIT 1",
+                    [$categoryId, $groupId]
+                ) ?? 0);
+                if ($existing > 0) {
+                    $skipped++;
+                    continue;
+                }
+            }
+            $options = $ay->searchAttributeOptionsByGroupId($categoryId, $groupId, '');
+            $first = $options[0] ?? null;
+            if (!is_array($first) || (int) ($first['id'] ?? 0) <= 0) {
+                $skipped++;
+                continue;
+            }
+            Database::execute(
+                "INSERT INTO ay_required_group_defaults (ay_category_id, ay_group_id, ay_group_name, default_ay_id, default_label)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE ay_group_name=VALUES(ay_group_name),
+                                        default_ay_id=VALUES(default_ay_id),
+                                        default_label=VALUES(default_label)",
+                [
+                    $categoryId,
+                    $groupId,
+                    $groupName !== '' ? $groupName : null,
+                    (int) $first['id'],
+                    trim((string) ($first['label'] ?? '')) !== '' ? (string) $first['label'] : null,
+                ]
+            );
+            $saved++;
+        }
+        Database::commit();
+        json_out(200, ['ok' => true, 'data' => [
+            'category_id' => $categoryId,
+            'saved' => $saved,
+            'skipped' => $skipped,
+            'considered' => count($requiredGroups),
+        ]]);
+    } catch (\Throwable $e) {
+        Database::rollback();
+        json_out(500, ['ok' => false, 'error' => 'Autofill failed: ' . $e->getMessage()]);
+    }
 }
 
 if ($action === 'product_material_composition_save') {
@@ -2172,6 +3116,37 @@ function filter_categories_by_gender(array $items, string $gender): array
     }));
 }
 
+function extract_missing_payload_hints_from_error_text(string $errorText): array
+{
+    $text = trim($errorText);
+    if ($text === '') {
+        return [];
+    }
+    $requiredGroups = [];
+    if (preg_match_all('/Missing attribute for group\s+([a-z0-9_]+)\s+with id\s+(\d+)/i', $text, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $match) {
+            $groupId = (int) ($match[2] ?? 0);
+            if ($groupId <= 0 || isset($requiredGroups[$groupId])) {
+                continue;
+            }
+            $requiredGroups[$groupId] = [
+                'group_id' => $groupId,
+                'group_name' => strtolower(trim((string) ($match[1] ?? ('group_' . $groupId)))),
+            ];
+        }
+    }
+    $sizeNotFound = preg_match('/\bsize not found\b/i', $text) === 1;
+    if ($requiredGroups === [] && !$sizeNotFound) {
+        return [];
+    }
+    return [
+        'captured_at' => gmdate('c'),
+        'size_not_found' => $sizeNotFound,
+        'required_groups' => array_values($requiredGroups),
+        'raw_error' => mb_substr($text, 0, 4000),
+    ];
+}
+
 function build_product_detail_payload(int $psId, bool $includeRemote = true): array
 {
     $repo = new ProductRepository();
@@ -2194,6 +3169,15 @@ function build_product_detail_payload(int $psId, bool $includeRemote = true): ar
          LIMIT 50",
         [$psId]
     );
+    $missingPayloadRaw = trim((string) ($product['ay_missing_payload_json'] ?? ''));
+    if ($errorHistory !== []) {
+        $latestHints = extract_missing_payload_hints_from_error_text((string) ($errorHistory[0]['error_message'] ?? ''));
+        if ($latestHints !== []) {
+            $product['ay_missing_payload_json'] = json_encode($latestHints, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        } elseif ($missingPayloadRaw === '') {
+            $product['ay_missing_payload_json'] = null;
+        }
+    }
 
     $psProduct = null;
     $psCombinations = [];

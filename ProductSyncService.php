@@ -251,9 +251,15 @@ class ProductSyncService
                         $psImgId = $this->extractImageId($url);
                         $existing = $this->products->findImageByProductAndPsImageId($productId, $psImgId);
                         $imgDbId = $this->products->upsertImage($productId, $url, $psImgId, $pos);
+                        $existingPublicUrl = trim((string) ($existing['public_url'] ?? ''));
+                        $existingWidth = (int) ($existing['width'] ?? 0);
+                        $existingHeight = (int) ($existing['height'] ?? 0);
+                        $existingLooksNormalized = str_contains($existingPublicUrl, '/ay-normalized/');
+                        $existingMeetsAyMinimum = $existingWidth >= 1125 && $existingHeight >= 1500;
                         if (($existing['status'] ?? '') === 'ok'
-                            && trim((string) ($existing['public_url'] ?? '')) !== ''
+                            && $existingPublicUrl !== ''
                             && (string) ($existing['source_url'] ?? '') === $url
+                            && ($existingLooksNormalized || $existingMeetsAyMinimum)
                         ) {
                             $normalizedUrls[] = (string) $existing['public_url'];
                             continue;
@@ -288,6 +294,8 @@ class ProductSyncService
                         'export_title' => $localProduct['export_title'] ?? null,
                         'export_description' => $localProduct['export_description'] ?? null,
                         'export_material_composition' => $localProduct['export_material_composition'] ?? null,
+                        'ay_manual_required_attributes_json' => $localProduct['ay_manual_required_attributes_json'] ?? null,
+                        'ay_missing_payload_json' => $localProduct['ay_missing_payload_json'] ?? null,
                         'ay_category_id' => $localProduct['ay_category_id'] ?? null,
                         'ay_brand_id' => $localProduct['ay_brand_id'] ?? null,
                         'category_ps_id' => $localProduct['category_ps_id'] ?? null,
@@ -308,6 +316,24 @@ class ProductSyncService
                         'warning' => $warning,
                         'reason_code' => $this->extractReasonCode((string) $warning),
                     ]);
+                }
+                $variantEans = array_values(array_filter(array_map(
+                    static fn (array $variant): string => trim((string) ($variant['ean'] ?? '')),
+                    (array) ($ayProduct['variants'] ?? [])
+                )));
+                $externalEanConflicts = $this->products->findExternalEanConflicts($productId, $variantEans);
+                if ($externalEanConflicts !== []) {
+                    $errors = [];
+                    foreach ($externalEanConflicts as $conflict) {
+                        $errors[] = sprintf(
+                            '[reason=duplicate_ean_external] EAN %s already used by PS#%d (style_key=%s, combo=%s)',
+                            (string) ($conflict['ean13'] ?? 'unknown'),
+                            (int) ($conflict['ps_id'] ?? 0),
+                            trim((string) ($conflict['ay_style_key'] ?? '')) !== '' ? (string) $conflict['ay_style_key'] : 'n/a',
+                            (string) ($conflict['ps_combo_id'] ?? 'n/a')
+                        );
+                    }
+                    throw new ValidationException('Product validation failed', array_values(array_unique($errors)));
                 }
                 $this->logger->info('Preflight passed PS#' . $psId, [
                     'elapsed_ms' => $mapElapsedMs,
@@ -343,6 +369,7 @@ class ProductSyncService
                         $results
                     )));
                     $errorMessage = $pushErrors !== [] ? implode(' | ', array_values(array_unique($pushErrors))) : 'AY push returned error';
+                    $this->persistAyMissingPayloadHints($productId, $errorMessage);
                     $this->products->markError($productId, $errorMessage);
                     $this->recordProductErrorEvent(
                         $productId,
@@ -729,5 +756,72 @@ class ProductSyncService
         $stockResults = $stockItems !== [] ? $this->ay->updateStocks($stockItems) : [];
         $priceResults = $priceItems !== [] ? $this->ay->updatePrices($priceItems) : [];
         return [$stockResults, $priceResults];
+    }
+
+    private function persistAyMissingPayloadHints(int $productId, string $errorMessage): void
+    {
+        if ($productId <= 0 || trim($errorMessage) === '') {
+            return;
+        }
+        $hints = $this->extractAyMissingPayloadHints($errorMessage);
+        if ($hints === null) {
+            return;
+        }
+        try {
+            Database::execute(
+                "UPDATE products SET ay_missing_payload_json = ?, updated_at = NOW() WHERE id = ?",
+                [
+                    json_encode($hints, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                    $productId,
+                ]
+            );
+        } catch (\Throwable) {
+            // Keep sync resilient if hint persistence fails.
+        }
+    }
+
+    private function extractAyMissingPayloadHints(string $errorMessage): ?array
+    {
+        $raw = trim($errorMessage);
+        if ($raw === '') {
+            return null;
+        }
+        $groups = [];
+        if (preg_match_all('/Missing attribute for group\s+([a-z0-9_]+)\s+with id\s+(\d+)/i', $raw, $matches, PREG_SET_ORDER)) {
+            foreach ($matches as $match) {
+                $groupId = (int) ($match[2] ?? 0);
+                if ($groupId <= 0 || isset($groups[$groupId])) {
+                    continue;
+                }
+                $groups[$groupId] = [
+                    'group_id' => $groupId,
+                    'group_name' => strtolower(trim((string) ($match[1] ?? 'group_' . $groupId))),
+                ];
+            }
+        }
+        $notNeededGroups = [];
+        if (preg_match_all('/group\s+([a-z0-9_]+)\s+\(group id\s+(\d+)\)\s+(?:are not needed for this category|should not be in the attributes array)/i', $raw, $extra, PREG_SET_ORDER)) {
+            foreach ($extra as $match) {
+                $groupId = (int) ($match[2] ?? 0);
+                if ($groupId <= 0 || isset($notNeededGroups[$groupId])) {
+                    continue;
+                }
+                $notNeededGroups[$groupId] = [
+                    'group_id' => $groupId,
+                    'group_name' => strtolower(trim((string) ($match[1] ?? ('group_' . $groupId)))),
+                ];
+            }
+        }
+        $sizeNotFound = preg_match('/\bsize not found\b/i', $raw) === 1;
+        if ($groups === [] && $notNeededGroups === [] && !$sizeNotFound) {
+            return null;
+        }
+        return [
+            'captured_at' => gmdate('c'),
+            'size_not_found' => $sizeNotFound,
+            'required_groups' => array_values($groups),
+            'not_needed_groups' => array_values($notNeededGroups),
+            'raw_error' => mb_substr($raw, 0, 4000),
+        ];
     }
 }

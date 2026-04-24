@@ -1,6 +1,7 @@
 'use strict';
 
 let requiredGroupDefaultsDraft = [];
+const requiredGroupOptionsCache = {};
 
 async function loadAttributeMappings() {
   const tbody = document.getElementById('attributes-body');
@@ -117,7 +118,7 @@ async function loadRequiredGroupDefaults(categoryIdOverride = null) {
   }
   const r = await api('required_group_defaults', { category_id: categoryId > 0 ? categoryId : undefined });
   if (!r.ok || !r.data?.ok) {
-    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--red);padding:14px;">${esc(r.data?.error || 'Failed to load defaults')}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" style="color:var(--red);padding:14px;">${esc(r.data?.error || 'Failed to load defaults')}</td></tr>`;
     return;
   }
   requiredGroupDefaultsDraft = Array.isArray(r.data.data) ? r.data.data.map((row) => ({
@@ -134,7 +135,7 @@ function renderRequiredGroupDefaults() {
   const tbody = document.getElementById('req-defaults-body');
   if (!tbody) return;
   if (!requiredGroupDefaultsDraft.length) {
-    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);padding:14px;text-align:center;">No defaults yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);padding:14px;text-align:center;">No defaults yet</td></tr>';
     return;
   }
   tbody.innerHTML = requiredGroupDefaultsDraft.map((row, idx) => `
@@ -144,6 +145,14 @@ function renderRequiredGroupDefaults() {
       <td><input class="fi req-defaults-input" data-idx="${idx}" data-key="ay_group_name" value="${esc(row.ay_group_name || '')}"></td>
       <td><input class="fi req-defaults-input" data-idx="${idx}" data-key="default_ay_id" type="number" value="${Number(row.default_ay_id || 0)}"></td>
       <td><input class="fi req-defaults-input" data-idx="${idx}" data-key="default_label" value="${esc(row.default_label || '')}"></td>
+      <td>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <select class="fi req-defaults-option-select" data-idx="${idx}" style="min-width:220px;">
+            <option value="${Number(row.default_ay_id || 0)}">${Number(row.default_ay_id || 0) > 0 ? `Current: AY#${Number(row.default_ay_id || 0)} ${esc(row.default_label || '')}` : 'Pick option...'}</option>
+          </select>
+          <button class="btn btn-sm req-defaults-load-options" data-idx="${idx}">Load</button>
+        </div>
+      </td>
     </tr>
   `).join('');
   tbody.querySelectorAll('.req-defaults-input').forEach((input) => {
@@ -156,6 +165,61 @@ function renderRequiredGroupDefaults() {
       requiredGroupDefaultsDraft[idx][key] = numKeys.includes(key) ? Number(t.value || 0) : String(t.value || '');
     });
   });
+  tbody.querySelectorAll('.req-defaults-load-options').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const idx = Number(btn.dataset.idx || 0);
+      await loadRequiredDefaultOptionsForRow(idx);
+    });
+  });
+  tbody.querySelectorAll('.req-defaults-option-select').forEach((sel) => {
+    sel.addEventListener('change', (event) => {
+      const idx = Number(event.target.dataset.idx || 0);
+      const row = requiredGroupDefaultsDraft[idx];
+      if (!row) return;
+      const selected = event.target.options[event.target.selectedIndex];
+      const ayId = Number(event.target.value || 0);
+      row.default_ay_id = ayId;
+      row.default_label = ayId > 0 ? String(selected?.dataset?.label || selected?.textContent || '').replace(/^AY#\d+\s*/, '') : '';
+      renderRequiredGroupDefaults();
+    });
+  });
+}
+
+async function loadRequiredDefaultOptionsForRow(idx) {
+  const row = requiredGroupDefaultsDraft[idx];
+  if (!row) return;
+  const categoryId = Number(row.ay_category_id || document.getElementById('req-defaults-category-id')?.value || 0);
+  const groupId = Number(row.ay_group_id || 0);
+  if (categoryId <= 0 || groupId <= 0) {
+    toast('Set category and group IDs first', 'err');
+    return;
+  }
+  const key = `${categoryId}|${groupId}`;
+  let items = requiredGroupOptionsCache[key];
+  if (!Array.isArray(items)) {
+    const r = await api('required_group_default_options', { category_id: categoryId, group_id: groupId }, 'POST');
+    if (!r.ok || !r.data?.ok) {
+      toast(r.data?.error || 'Could not load AY options', 'err');
+      return;
+    }
+    items = Array.isArray(r.data.data?.items) ? r.data.data.items : [];
+    requiredGroupOptionsCache[key] = items;
+  }
+  const select = document.querySelector(`.req-defaults-option-select[data-idx="${idx}"]`);
+  if (!select) return;
+  if (!items.length) {
+    select.innerHTML = '<option value="0">No AY options found</option>';
+    return;
+  }
+  const currentId = Number(row.default_ay_id || 0);
+  select.innerHTML = [
+    '<option value="0">Pick option...</option>',
+    ...items.slice(0, 250).map((item) => {
+      const id = Number(item.id || 0);
+      const label = String(item.label || '');
+      return `<option value="${id}" data-label="${esc(label)}" ${id === currentId ? 'selected' : ''}>AY#${id} ${esc(label)}</option>`;
+    }),
+  ].join('');
 }
 
 function wireAttributesPage() {
@@ -163,6 +227,34 @@ function wireAttributesPage() {
   document.getElementById('attr-type-filter').addEventListener('change', renderAttributeMappings);
   document.getElementById('attr-refresh').addEventListener('click', loadAttributeMappings);
   document.getElementById('req-defaults-refresh').addEventListener('click', () => loadRequiredGroupDefaults());
+  document.getElementById('req-defaults-autofill').addEventListener('click', async () => {
+    const categoryId = Number(document.getElementById('req-defaults-category-id')?.value || document.getElementById('attr-category-id')?.value || 0);
+    const overwrite = !!document.getElementById('req-defaults-overwrite')?.checked;
+    if (categoryId <= 0) {
+      toast('Set AY category id first', 'err');
+      return;
+    }
+    const result = document.getElementById('req-defaults-result');
+    if (result) {
+      result.textContent = 'Auto-filling from AY...';
+      result.style.color = 'var(--muted)';
+    }
+    const r = await api('required_group_defaults_autofill', { category_id: categoryId, overwrite });
+    if (!r.ok || !r.data?.ok) {
+      if (result) {
+        result.textContent = r.data?.error || 'Autofill failed';
+        result.style.color = 'var(--red)';
+      }
+      toast('Auto-fill failed', 'err');
+      return;
+    }
+    if (result) {
+      result.textContent = `Auto-filled ${Number(r.data.data?.saved || 0)} defaults (skipped ${Number(r.data.data?.skipped || 0)})`;
+      result.style.color = 'var(--green)';
+    }
+    toast(overwrite ? 'Defaults overwritten from AY' : 'Defaults auto-filled from AY', 'ok');
+    await loadRequiredGroupDefaults(categoryId);
+  });
   document.getElementById('req-defaults-category-id').addEventListener('change', () => loadRequiredGroupDefaults());
   document.getElementById('req-defaults-add-row').addEventListener('click', () => {
     const fallbackCategory = Number(document.getElementById('req-defaults-category-id')?.value || document.getElementById('attr-category-id')?.value || 0);

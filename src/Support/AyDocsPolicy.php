@@ -54,6 +54,19 @@ final class AyDocsPolicy
     public function classifyAyError(string $message): string
     {
         $m = strtolower($message);
+        // Prefer contract/payload validation signals over generic retry hints.
+        // Some AY responses append "Retry later..." even for validation errors.
+        if (
+            str_contains($m, 'missing attribute for group')
+            || str_contains($m, 'size not found')
+            || str_contains($m, 'product master not found')
+            || str_contains($m, 'missing required')
+            || str_contains($m, 'invalid')
+            || str_contains($m, 'required')
+            || str_contains($m, 'schema')
+        ) {
+            return 'ay_validation';
+        }
         if (str_contains($m, '429') || str_contains($m, 'rate limit')) {
             return 'ay_rate_limit';
         }
@@ -62,9 +75,6 @@ final class AyDocsPolicy
         }
         if (str_contains($m, 'timeout') || str_contains($m, 'timed out')) {
             return 'ay_timeout';
-        }
-        if (str_contains($m, 'invalid') || str_contains($m, 'required') || str_contains($m, 'schema')) {
-            return 'ay_validation';
         }
         if (str_contains($m, 'deprecated')) {
             return 'ay_deprecated';
