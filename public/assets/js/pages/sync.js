@@ -7,7 +7,21 @@ async function runSync(command, extra = {}) {
 
   const r = await api('sync', { command, async: true, ...extra });
   if (r.status === 409) { toast('Another sync is running', 'err'); return; }
-  if (!r.ok) { toast('Sync failed to start', 'err'); return; }
+  if (!r.ok) {
+    let hint = '';
+    const spawnStatus = await api('sync_spawn_status', {}, 'POST');
+    if (spawnStatus.ok && spawnStatus.data?.ok) {
+      const tail = String(spawnStatus.data?.data?.recent_output || '').trim();
+      if (tail) {
+        const lines = tail.split('\n').map(s => s.trim()).filter(Boolean);
+        hint = lines[lines.length - 1] || '';
+      }
+    }
+    const msg = String(r.data?.error || 'Sync failed to start');
+    toast(hint ? `${msg} (${hint})` : msg, 'err');
+    addSyncLog(`${now()} ✗ ${command} failed to start${hint ? ` — ${hint}` : ''}`);
+    return;
+  }
 
   if (badge) { badge.className = 'badge b-ok'; badge.textContent = 'Started'; }
   toast(r.data?.data?.message || 'Sync started', 'ok');

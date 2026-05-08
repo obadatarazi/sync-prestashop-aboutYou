@@ -1531,6 +1531,24 @@ if ($action === 'sync_runs') {
     json_out(200, ['ok' => true, 'data' => $repo->getRecent(30)]);
 }
 
+if ($action === 'sync_spawn_status') {
+    $logPath = resolveSyncSpawnLogPath();
+    $exists = is_file($logPath);
+    $hint = '';
+    if ($exists) {
+        $lines = readFileTailLines($logPath, 12);
+        $hint = trim(implode("\n", $lines));
+        if (strlen($hint) > 4000) {
+            $hint = substr($hint, -4000);
+        }
+    }
+    json_out(200, ['ok' => true, 'data' => [
+        'log_exists' => $exists,
+        'log_path' => $logPath,
+        'recent_output' => $hint,
+    ]]);
+}
+
 if ($action === 'metrics') {
     $repo = new SyncMetricsRepository();
     $limit = bounded_page_size($input['limit'] ?? null, 100, 1000);
@@ -2885,20 +2903,29 @@ if ($action === 'sync') {
         flock($lock, LOCK_UN);
         fclose($lock);
 
-        $php    = escapeshellarg(PHP_BINARY);
+        $php    = escapeshellarg(resolvePhpCliBinary());
         $script = escapeshellarg(__DIR__ . '/../bin/sync.php');
+        $spawnLog = escapeshellarg(resolveSyncSpawnLogPath());
         $psIdStr = implode(',', $psIds);
         $commandArg = escapeshellarg($command);
         $extraArgs = $psIdStr ? ' --ps-ids=' . escapeshellarg($psIdStr) : '';
-        $cmd = "sh -c \"{$php} {$script} {$commandArg}{$extraArgs} > /dev/null 2>&1 & echo \\$!\"";
+        $cmd = "sh -c \"{$php} {$script} {$commandArg}{$extraArgs} >> {$spawnLog} 2>&1 & echo \\$!\"";
         $output = [];
         @exec($cmd, $output);
         $pid = isset($output[0]) ? (int) trim((string) $output[0]) : 0;
-        if ($pid > 0) {
+        if ($pid > 0 && isProcessRunning($pid)) {
             @file_put_contents(resolveSyncPidPath(), (string) $pid, LOCK_EX);
+            json_out(202, ['ok' => true, 'data' => [
+                'message' => "Sync '{$command}' started in background",
+                'pid' => $pid,
+            ]]);
         }
 
-        json_out(202, ['ok' => true, 'data' => ['message' => "Sync '{$command}' started in background"]]);
+        // Fallback path: if background spawn fails, run inline so the action is not silently lost.
+        $lock = @fopen($lockPath, 'c+');
+        if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
+            json_out(500, ['ok' => false, 'error' => "Failed to start background sync '{$command}' (see logs/sync-spawn.log)"]);
+        }
     }
 
     // Inline sync (stock, orders, order-status run fast enough)
@@ -3024,6 +3051,74 @@ function resolveSyncPidPath(): string
         return $raw;
     }
     return __DIR__ . '/../' . ltrim($raw, './');
+}
+
+function resolveSyncSpawnLogPath(): string
+{
+    $raw = (string) ($_ENV['SYNC_SPAWN_LOG_FILE'] ?? 'logs/sync-spawn.log');
+    $path = (str_starts_with($raw, '/') || preg_match('/^[A-Za-z]:[\\\\\\/]/', $raw))
+        ? $raw
+        : (__DIR__ . '/../' . ltrim($raw, './'));
+    $dir = dirname($path);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    return $path;
+}
+
+function resolvePhpCliBinary(): string
+{
+    $configured = trim((string) ($_ENV['PHP_CLI_BIN'] ?? ''));
+    if ($configured !== '') {
+        return $configured;
+    }
+
+    $binary = (string) PHP_BINARY;
+    $binaryName = strtolower((string) basename($binary));
+    if ($binary !== '' && !str_contains($binaryName, 'fpm') && !str_contains($binaryName, 'cgi')) {
+        return $binary;
+    }
+
+    $phpBindir = (string) PHP_BINDIR;
+    if ($phpBindir !== '') {
+        $candidate = rtrim($phpBindir, '/\\') . DIRECTORY_SEPARATOR . 'php';
+        if (is_file($candidate) && is_executable($candidate)) {
+            return $candidate;
+        }
+    }
+
+    return 'php';
+}
+
+function isProcessRunning(int $pid): bool
+{
+    if ($pid <= 0) {
+        return false;
+    }
+    if (function_exists('posix_kill')) {
+        return @posix_kill($pid, 0);
+    }
+    @exec('kill -0 ' . (int) $pid, $out, $code);
+    return $code === 0;
+}
+
+function readFileTailLines(string $path, int $maxLines = 20): array
+{
+    $maxLines = max(1, min(200, $maxLines));
+    if (!is_file($path) || !is_readable($path)) {
+        return [];
+    }
+    $content = @file_get_contents($path);
+    if ($content === false || $content === '') {
+        return [];
+    }
+    $normalized = str_replace(["\r\n", "\r"], "\n", $content);
+    $lines = explode("\n", $normalized);
+    $lines = array_values(array_filter($lines, static fn (string $line): bool => trim($line) !== ''));
+    if ($lines === []) {
+        return [];
+    }
+    return array_slice($lines, -$maxLines);
 }
 
 function resolveLogPaths(): array
