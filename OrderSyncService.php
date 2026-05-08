@@ -71,15 +71,28 @@ class OrderSyncService
         return $this->stats;
     }
 
-    private function importSingleOrder(array $ayOrder): void
+    public function retryImportByAyOrderId(string $ayOrderId): bool
+    {
+        $ayOrderId = trim($ayOrderId);
+        if ($ayOrderId === '') {
+            throw new \InvalidArgumentException('Missing AY order id for retry import.');
+        }
+        $order = $this->ay->getOrder($ayOrderId);
+        if (!is_array($order) || $order === []) {
+            throw new \RuntimeException('AboutYou order not found for retry import: ' . $ayOrderId);
+        }
+        return $this->importSingleOrder($order);
+    }
+
+    private function importSingleOrder(array $ayOrder): bool
     {
         $ayId = (string)($ayOrder['id'] ?? $ayOrder['order_id'] ?? $ayOrder['order_number'] ?? '');
-        if (!$ayId) { $this->stats['orders_skipped']++; return; }
+        if (!$ayId) { $this->stats['orders_skipped']++; return false; }
 
         // Dedup check
         if ($this->orders->isProcessed($ayId)) {
             $this->stats['orders_skipped']++;
-            return;
+            return true;
         }
 
         // Check quarantine
@@ -87,7 +100,7 @@ class OrderSyncService
         if ($existing && $existing['sync_status'] === 'quarantined') {
             $this->stats['orders_skipped']++;
             $this->logger->warning("Order {$ayId} is quarantined — skipping");
-            return;
+            return false;
         }
 
         try {
@@ -148,6 +161,7 @@ class OrderSyncService
 
             // Acknowledge in AY
             $this->ay->updateOrderStatus($ayId, 'processing');
+            return true;
 
         } catch (\Throwable $e) {
             $this->stats['orders_failed']++;
@@ -157,6 +171,7 @@ class OrderSyncService
             if (!$permanent) {
                 $this->retryJobs->enqueue('order_import', $ayId, ['ay_order_id' => $ayId], $e->getMessage());
             }
+            return false;
         }
     }
 
@@ -185,9 +200,11 @@ class OrderSyncService
                 // Idempotency safeguard: avoid duplicate status pushes.
                 continue;
             }
-            $extra    = [];
-            if ($ayStatus === 'shipped' && !empty($psOrder['shipping_number'])) {
-                $extra['tracking_number'] = $psOrder['shipping_number'];
+            $extra = [];
+            $shippingNumber = trim((string) ($psOrder['shipping_number'] ?? ''));
+            if ($shippingNumber !== '' && in_array($ayStatus, ['shipped', 'returned'], true)) {
+                // 'shipped' uses tracking_number directly; 'returned' falls back to it for return_tracking_key.
+                $extra['tracking_number'] = $shippingNumber;
             }
 
             if ($this->ay->updateOrderStatus($ayRow['ay_order_id'], $ayStatus, $extra)) {
@@ -201,6 +218,7 @@ class OrderSyncService
                 $this->retryJobs->enqueue('order_status', (string) $ayRow['ay_order_id'], [
                     'ps_order_id' => $psId,
                     'ay_status' => $ayStatus,
+                    'extra' => $extra,
                 ], 'Status push failed');
             }
         }

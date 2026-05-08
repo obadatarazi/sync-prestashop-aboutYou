@@ -1,0 +1,42 @@
+
+
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta http-equiv="X-UA-Compatible"
+              content="IE=edge">
+        <meta name="description"
+              content="ABOUT YOU Seller Center">
+        <meta name="keywords"
+              content="ABOUT YOU, Seller Center">
+        <meta name="viewport"
+              content="width=device-width, initial-scale=1.0">
+        <title>ABOUT YOU Seller Center</title>
+        <link rel="icon" href="/favicon.ico" sizes="48x48">
+        <link rel="icon" href="/static/images/favicon-96x96.b1eeac9f9f90.png" type="image/png" sizes="96x96">
+        <link rel="apple-touch-icon" href="/static/images/favicon-192x192.30db921dda7f.png">
+        
+        
+        <link  rel="stylesheet" href="/static/assets/main-S18bUS-k.04a09105b8cb.css" />
+<script type="module" crossorigin="" src="/static/assets/main-C4TcAZwe.d3be0edbe0a6.js"></script>
+<link href="/static/assets/toasts-ChOEIZYq.db5e9ae1d9c9.js" type="text/javascript" crossorigin="anonymous" rel="modulepreload" as="script" />
+    </head>
+    <body class="bg-white">
+        <section class="flex justify-center">
+            <div class="max-w-lg p-16 text-center ">
+                <h2 class="mb-2 font-extrabold text-7xl md:text-9xl">
+                    <span class="sr-only">Error</span>
+                    404
+                </h2>
+                <p class="mb-8 text-xl font-semibold md:text-3xl text-base-500">Sorry, the page you are looking for does not exist.</p>
+                <a rel="noopener noreferrer"
+                   href="/"
+                   class="btn btn-primary">
+                    <i class="icon icon-chevron-left text-xs" aria-hidden="true"></i>
+                    SellerCenter
+                </a>
+            </div>
+        </section>
+    </body>
+</html>

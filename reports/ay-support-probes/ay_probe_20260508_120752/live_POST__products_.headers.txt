@@ -1,0 +1,19 @@
+HTTP/2 422 
+date: Fri, 08 May 2026 09:08:05 GMT
+content-type: application/json; charset=utf-8
+content-length: 204
+cf-ray: 9f87515d2f2c6708-AMS
+x-ratelimit-limit: 100
+x-ratelimit-remaining: 99
+x-content-type-options: nosniff
+referrer-policy: same-origin
+cross-origin-opener-policy: same-origin
+x-frame-options: DENY
+x-pod-name: sellerscenter-api-6b76485bd9-7zt7q
+vary: Cookie
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+cf-cache-status: DYNAMIC
+set-cookie: __cf_bm=piLMlrLAuuO7wa7XwxaOduOuU_eoPjmliiS5XxU1r.8-1778231285-1.0.1.1-0McRhGat9yJXwT0rJhoRJx7MAOdfv1__G3phWNskwms5vu_G5G6Ct3OWphoYk60ytMc7vW_vQuMs4RGX03X1Kl5OflLszkbnwVWFPOzVvks; path=/; expires=Fri, 08-May-26 09:38:05 GMT; domain=.aboutyou.com; HttpOnly; Secure; SameSite=None
+server: cloudflare
+alt-svc: h3=":443"; ma=86400
+

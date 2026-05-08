@@ -5,6 +5,7 @@ namespace SyncBridge\Services;
 use SyncBridge\Database\RetryJobRepository;
 use SyncBridge\Database\SyncRunRepository;
 use SyncBridge\Database\ProductRepository;
+use SyncBridge\Database\OrderRepository;
 use SyncBridge\Database\SyncMetricsRepository;
 use SyncBridge\Integration\AboutYouClient;
 use SyncBridge\Integration\AboutYouMapper;
@@ -166,15 +167,53 @@ final class SyncRunner
                     if (!($result['ok'] ?? false)) {
                         throw new \RuntimeException((string) ($result['error'] ?? 'product retry failed'));
                     }
-                } elseif ($jobType === 'order_status') {
-                    $result = $this->run('order-status', []);
-                    if (!($result['ok'] ?? false)) {
-                        throw new \RuntimeException((string) ($result['error'] ?? 'order status retry failed'));
+                    $nestedResult = is_array($result['result'] ?? null) ? $result['result'] : [];
+                    $summary = $this->extractRunSummary($nestedResult);
+                    if (($summary['failed'] ?? 0) > 0) {
+                        throw new \RuntimeException(sprintf(
+                            'product retry failed for PS#%d (failed=%d)',
+                            $psId,
+                            (int) $summary['failed']
+                        ));
                     }
+                } elseif ($jobType === 'order_status') {
+                    $payload = json_decode((string) ($job['payload_json'] ?? '{}'), true);
+                    if (!is_array($payload)) {
+                        $payload = [];
+                    }
+                    $status = trim((string) ($payload['ay_status'] ?? ''));
+                    if ($status === '') {
+                        throw new \RuntimeException('order_status retry missing ay_status payload');
+                    }
+                    // Reconstruct status extras (tracking/return keys) so retry mirrors the original push.
+                    $extraRaw = $payload['extra'] ?? [];
+                    $extra = is_array($extraRaw) ? $extraRaw : [];
+                    foreach (['tracking_number', 'return_tracking_key'] as $legacyKey) {
+                        if (!array_key_exists($legacyKey, $extra) && isset($payload[$legacyKey])) {
+                            $extra[$legacyKey] = $payload[$legacyKey];
+                        }
+                    }
+                    $http = new HttpClient(
+                        (int) ($_ENV['HTTP_TIMEOUT_SEC'] ?? 30),
+                        (int) ($_ENV['HTTP_MAX_RETRIES'] ?? 3)
+                    );
+                    $ay = new AboutYouClient($http);
+                    if (!$ay->updateOrderStatus($entityKey, $status, $extra)) {
+                        throw new \RuntimeException('order status retry failed');
+                    }
+                    (new OrderRepository())->markStatusPushed($entityKey, $status);
                 } elseif ($jobType === 'order_import') {
-                    $result = $this->run('orders', []);
-                    if (!($result['ok'] ?? false)) {
-                        throw new \RuntimeException((string) ($result['error'] ?? 'order import retry failed'));
+                    $http = new HttpClient(
+                        (int) ($_ENV['HTTP_TIMEOUT_SEC'] ?? 30),
+                        (int) ($_ENV['HTTP_MAX_RETRIES'] ?? 3)
+                    );
+                    $ps = new PrestaShopClient($http);
+                    $ay = new AboutYouClient($http);
+                    $mapper = new AboutYouMapper();
+                    $imported = (new OrderSyncService('retry-' . bin2hex(random_bytes(6)), $ps, $ay, $mapper))
+                        ->retryImportByAyOrderId($entityKey);
+                    if (!$imported) {
+                        throw new \RuntimeException('order import retry failed');
                     }
                 } else {
                     throw new \RuntimeException('Unsupported retry job type: ' . $jobType);

@@ -1,0 +1,108 @@
+About You API probe report
+Generated at: 2026-05-08T09:13:01Z (UTC)
+Base URL: https://partner.aboutyou.com/api/v1
+Category ID: 1518
+Host: Obadas-MacBook-Air.local
+
+Key fingerprints:
+  LIVE_KEY_SUFFIX=...pLY3iN
+  SANDBOX_KEY_SUFFIX=...D2f0r1
+
+Tests:
+
+- ENV=live METHOD=GET PATH=/orders/?per_page=1
+  STATUS=200
+  CONTENT_TYPE=application/json; charset=utf-8
+  CF_RAY=9f87589caeef8477-AMS
+  BODY_PREVIEW="{\"items\": [], \"pagination\": {\"per_page\": 1, \"page\": 1, \"pages\": 1, \"total\": 0, \"next\": null, \"prev\": null, \"next_cursor\": null}}"
+  HEADERS_FILE=live_GET__orders__per_page_1.headers.txt
+  BODY_FILE=live_GET__orders__per_page_1.body.txt
+
+- ENV=sandbox METHOD=GET PATH=/orders/?per_page=1
+  STATUS=200
+  CONTENT_TYPE=application/json; charset=utf-8
+  CF_RAY=9f87589fa9e0dfa5-AMS
+  BODY_PREVIEW="{\"items\": [{\"order_items\": [{\"return_tracking_key\": \"\", \"shipment_tracking_key\": \"\", \"sku\": \"10650-503\", \"status\": \"open\", \"id\": 724298, \"vat\": 19.0, \"price_without_tax\": 5552, \"price_with_tax\": 6607, \"custom_data\": null}, {\"return_tracking_key\": \"\", \"shipment_tracking_key\": \"\", \"sku\": \"10650-504\", \"status\": \"open\", \"id\": 724299, \"vat\": 19.0, \"price_without_tax\": 5552, \"price_with_tax\": 6607, \"custom_data\": null}, {\"return_tracking_key\": \"\", \"shipment_tracking_key\": \"\", \"sku\": \"10650-504\", \"status\": \"open\", \"id\": 724300, \"vat\": 19.0, \"price_without_tax\": 5552, \"price_with_tax\": 6607, \"custom_d"
+  HEADERS_FILE=sandbox_GET__orders__per_page_1.headers.txt
+  BODY_FILE=sandbox_GET__orders__per_page_1.body.txt
+
+- ENV=live METHOD=GET PATH=/categories/1518/attribute-groups
+  STATUS=200
+  CONTENT_TYPE=application/json; charset=utf-8
+  CF_RAY=9f8758a69c0ad0d9-AMS
+  BODY_PREVIEW="[{\"attributes\": [{\"id\": 180726, \"name\": \"Weitere Stoffart\", \"frontend_name\": \"Additional material\"}, {\"id\": 158445, \"name\": \"Grobstrick\", \"frontend_name\": \"Chunky knit\"}, {\"id\": 158446, \"name\": \"Feinstrick\", \"frontend_name\": \"Fine knit\"}, {\"id\": 159288, \"name\": \"Fleece\", \"frontend_name\": \"Fleece\"}, {\"id\": 180727, \"name\": \"Jersey/Trikot\", \"frontend_name\": \"Jersey\"}], \"id\": 1717, \"name\": \"knit_material_type\", \"frontend_name\": \"Type of material\", \"is_multiselect\": false}, {\"attributes\": [{\"id\": 158747, \"name\": \"nein\", \"frontend_name\": \"No\"}, {\"id\": 158746, \"name\": \"ja\", \"frontend_name\": \"Yes\"}], "
+  HEADERS_FILE=live_GET__categories_1518_attribute-groups.headers.txt
+  BODY_FILE=live_GET__categories_1518_attribute-groups.body.txt
+
+- ENV=sandbox METHOD=GET PATH=/categories/1518/attribute-groups
+  STATUS=200
+  CONTENT_TYPE=application/json; charset=utf-8
+  CF_RAY=9f8758adb9064914-AMS
+  BODY_PREVIEW="[{\"attributes\": [{\"id\": 180726, \"name\": \"Weitere Stoffart\", \"frontend_name\": \"Additional material\"}, {\"id\": 158445, \"name\": \"Grobstrick\", \"frontend_name\": \"Chunky knit\"}, {\"id\": 158446, \"name\": \"Feinstrick\", \"frontend_name\": \"Fine knit\"}, {\"id\": 159288, \"name\": \"Fleece\", \"frontend_name\": \"Fleece\"}, {\"id\": 180727, \"name\": \"Jersey/Trikot\", \"frontend_name\": \"Jersey\"}], \"id\": 1717, \"name\": \"knit_material_type\", \"frontend_name\": \"Type of material\", \"is_multiselect\": false}, {\"attributes\": [{\"id\": 158747, \"name\": \"nein\", \"frontend_name\": \"No\"}, {\"id\": 158746, \"name\": \"ja\", \"frontend_name\": \"Yes\"}], "
+  HEADERS_FILE=sandbox_GET__categories_1518_attribute-groups.headers.txt
+  BODY_FILE=sandbox_GET__categories_1518_attribute-groups.body.txt
+
+- ENV=live METHOD=GET PATH=/categories/1518/attribute_groups
+  STATUS=404
+  CONTENT_TYPE=text/html; charset=utf-8
+  CF_RAY=9f8758b3bbc9b921-AMS
+  BODY_PREVIEW=" <!DOCTYPE html> <html lang=\"en\"> <head> <meta charset=\"UTF-8\"> <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"> <meta name=\"description\" content=\"ABOUT YOU Seller Center\"> <meta name=\"keywords\" content=\"ABOUT YOU, Seller Center\"> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"> <title>ABOUT YOU Seller Center</title> <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"48x48\"> <link rel=\"icon\" href=\"/static/images/favicon-96x96.b1eeac9f9f90.png\" type=\"i"
+  HEADERS_FILE=live_GET__categories_1518_attribute_groups.headers.txt
+  BODY_FILE=live_GET__categories_1518_attribute_groups.body.txt
+
+- ENV=sandbox METHOD=GET PATH=/categories/1518/attribute_groups
+  STATUS=404
+  CONTENT_TYPE=text/html; charset=utf-8
+  CF_RAY=9f8758b86948d251-AMS
+  BODY_PREVIEW=" <!DOCTYPE html> <html lang=\"en\"> <head> <meta charset=\"UTF-8\"> <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"> <meta name=\"description\" content=\"ABOUT YOU Seller Center\"> <meta name=\"keywords\" content=\"ABOUT YOU, Seller Center\"> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"> <title>ABOUT YOU Seller Center</title> <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"48x48\"> <link rel=\"icon\" href=\"/static/images/favicon-96x96.b1eeac9f9f90.png\" type=\"i"
+  HEADERS_FILE=sandbox_GET__categories_1518_attribute_groups.headers.txt
+  BODY_FILE=sandbox_GET__categories_1518_attribute_groups.body.txt
+
+- ENV=live METHOD=GET PATH=/categories/1518/attributes
+  STATUS=404
+  CONTENT_TYPE=text/html; charset=utf-8
+  CF_RAY=9f8758bc0a611936-AMS
+  BODY_PREVIEW=" <!DOCTYPE html> <html lang=\"en\"> <head> <meta charset=\"UTF-8\"> <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"> <meta name=\"description\" content=\"ABOUT YOU Seller Center\"> <meta name=\"keywords\" content=\"ABOUT YOU, Seller Center\"> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"> <title>ABOUT YOU Seller Center</title> <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"48x48\"> <link rel=\"icon\" href=\"/static/images/favicon-96x96.b1eeac9f9f90.png\" type=\"i"
+  HEADERS_FILE=live_GET__categories_1518_attributes.headers.txt
+  BODY_FILE=live_GET__categories_1518_attributes.body.txt
+
+- ENV=sandbox METHOD=GET PATH=/categories/1518/attributes
+  STATUS=404
+  CONTENT_TYPE=text/html; charset=utf-8
+  CF_RAY=9f8758bf796ffeaf-AMS
+  BODY_PREVIEW=" <!DOCTYPE html> <html lang=\"en\"> <head> <meta charset=\"UTF-8\"> <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"> <meta name=\"description\" content=\"ABOUT YOU Seller Center\"> <meta name=\"keywords\" content=\"ABOUT YOU, Seller Center\"> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"> <title>ABOUT YOU Seller Center</title> <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"48x48\"> <link rel=\"icon\" href=\"/static/images/favicon-96x96.b1eeac9f9f90.png\" type=\"i"
+  HEADERS_FILE=sandbox_GET__categories_1518_attributes.headers.txt
+  BODY_FILE=sandbox_GET__categories_1518_attributes.body.txt
+
+- ENV=live METHOD=GET PATH=/attributes?category_id=1518&per_page=1
+  STATUS=404
+  CONTENT_TYPE=text/html; charset=utf-8
+  CF_RAY=9f8758c3bbcdb8d2-AMS
+  BODY_PREVIEW=" <!DOCTYPE html> <html lang=\"en\"> <head> <meta charset=\"UTF-8\"> <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"> <meta name=\"description\" content=\"ABOUT YOU Seller Center\"> <meta name=\"keywords\" content=\"ABOUT YOU, Seller Center\"> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"> <title>ABOUT YOU Seller Center</title> <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"48x48\"> <link rel=\"icon\" href=\"/static/images/favicon-96x96.b1eeac9f9f90.png\" type=\"i"
+  HEADERS_FILE=live_GET__attributes_category_id_1518_per_page_1.headers.txt
+  BODY_FILE=live_GET__attributes_category_id_1518_per_page_1.body.txt
+
+- ENV=sandbox METHOD=GET PATH=/attributes?category_id=1518&per_page=1
+  STATUS=404
+  CONTENT_TYPE=text/html; charset=utf-8
+  CF_RAY=9f8758c8396e0d28-AMS
+  BODY_PREVIEW=" <!DOCTYPE html> <html lang=\"en\"> <head> <meta charset=\"UTF-8\"> <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"> <meta name=\"description\" content=\"ABOUT YOU Seller Center\"> <meta name=\"keywords\" content=\"ABOUT YOU, Seller Center\"> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"> <title>ABOUT YOU Seller Center</title> <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"48x48\"> <link rel=\"icon\" href=\"/static/images/favicon-96x96.b1eeac9f9f90.png\" type=\"i"
+  HEADERS_FILE=sandbox_GET__attributes_category_id_1518_per_page_1.headers.txt
+  BODY_FILE=sandbox_GET__attributes_category_id_1518_per_page_1.body.txt
+
+- ENV=live METHOD=POST PATH=/products/
+  STATUS=422
+  CONTENT_TYPE=application/json; charset=utf-8
+  CF_RAY=9f8758cccbad88ce-AMS
+  BODY_PREVIEW="{\"detail\": [{\"type\": \"too_short\", \"loc\": [\"body\", \"data\", \"items\"], \"msg\": \"List should have at least 1 item after validation, not 0\", \"ctx\": {\"field_type\": \"List\", \"min_length\": 1, \"actual_length\": 0}}]}"
+  HEADERS_FILE=live_POST__products_.headers.txt
+  BODY_FILE=live_POST__products_.body.txt
+
+- ENV=sandbox METHOD=POST PATH=/products/
+  STATUS=422
+  CONTENT_TYPE=application/json; charset=utf-8
+  CF_RAY=9f8758d1ca41dde3-AMS
+  BODY_PREVIEW="{\"detail\": [{\"type\": \"too_short\", \"loc\": [\"body\", \"data\", \"items\"], \"msg\": \"List should have at least 1 item after validation, not 0\", \"ctx\": {\"field_type\": \"List\", \"min_length\": 1, \"actual_length\": 0}}]}"
+  HEADERS_FILE=sandbox_POST__products_.headers.txt
+  BODY_FILE=sandbox_POST__products_.body.txt
+

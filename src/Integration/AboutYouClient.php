@@ -42,7 +42,7 @@ final class AboutYouClient
                 if (!is_array($requestItem)) {
                     continue;
                 }
-                $styleKey = trim((string) ($requestItem['style_key'] ?? ''));
+                $styleKey = trim((string) ($requestItem['style_key'] ?? $requestItem['styleKey'] ?? ''));
                 if ($styleKey !== '') {
                     $styleKeys[$styleKey] = true;
                 }
@@ -89,27 +89,63 @@ final class AboutYouClient
         $page = 1;
         $cursor = null;
         $orders = [];
+        $perPage = min(100, max(1, (int) ($_ENV['AY_ORDER_PAGE_SIZE'] ?? 100)));
+        $maxPages = max(1, min(500, (int) ($_ENV['AY_ORDERS_MAX_PAGES'] ?? 100)));
 
         do {
             $query = [
-                'per_page' => min(100, max(1, (int) ($_ENV['AY_ORDER_PAGE_SIZE'] ?? 100))),
+                'per_page' => $perPage,
                 'page' => $page,
             ];
-            if ($since !== null) {
-                $query['orders_from'] = gmdate('c', strtotime($since));
+            if ($since !== null && trim($since) !== '') {
+                $query['orders_from'] = $this->formatOrdersFromFilter($since);
             }
-            if ($cursor) {
+            if ($cursor !== null && $cursor !== '') {
                 unset($query['page']);
                 $query['cursor'] = $cursor;
             }
 
             $response = $this->request('GET', '/orders/', $query);
             $body = $response['json'] ?? [];
+            if (!is_array($body)) {
+                $body = [];
+            }
             $items = $body['items'] ?? [];
+            if (!is_array($items)) {
+                $items = [];
+            }
             $orders = array_merge($orders, $items);
-            $cursor = $body['cursor'] ?? $body['next_cursor'] ?? null;
+
+            $rawNextCursor = $body['cursor'] ?? $body['next_cursor'] ?? null;
+            $nextCursor = is_string($rawNextCursor) ? trim($rawNextCursor) : null;
+            if ($nextCursor === '') {
+                $nextCursor = null;
+            }
+            $cursor = $nextCursor;
+
+            $pagination = $body['pagination'] ?? null;
+            $hasNextByPagination = is_array($pagination)
+                && (int) ($pagination['page'] ?? 0) > 0
+                && (int) ($pagination['pages'] ?? 0) > 0
+                && (int) ($pagination['page'] ?? 0) < (int) ($pagination['pages'] ?? 0);
+
+            $itemCount = count($items);
+            $fullPage = $itemCount >= $perPage;
+            $hasMore = ($cursor !== null) || $hasNextByPagination || ($fullPage && $cursor === null);
+
             $page++;
-        } while (($cursor !== null || ($items ?? []) !== []) && count($items ?? []) === (int) ($query['per_page'] ?? 100) && $page <= 100);
+        } while ($hasMore && $page <= $maxPages);
+
+        if ($hasMore && $page > $maxPages) {
+            error_log(sprintf(
+                '[AY orders pagination warning] Hit AY_ORDERS_MAX_PAGES=%d with additional pages likely (since=%s, per_page=%d, last_cursor=%s, fetched=%d).',
+                $maxPages,
+                $since ?? '',
+                $perPage,
+                $cursor ?? 'none',
+                count($orders)
+            ));
+        }
 
         return $orders;
     }
@@ -121,7 +157,17 @@ final class AboutYouClient
         }
         $response = $this->request('GET', '/orders/', ['order_number' => $orderId]);
         $items = $response['json']['items'] ?? [];
-        $this->orderCache[$orderId] = $items[0] ?? null;
+        $order = is_array($items) ? ($items[0] ?? null) : null;
+        if ($order === null && ctype_digit($orderId)) {
+            try {
+                $response = $this->request('GET', '/orders/', ['id' => (int) $orderId]);
+                $items = $response['json']['items'] ?? [];
+                $order = is_array($items) ? ($items[0] ?? null) : null;
+            } catch (\Throwable) {
+                $order = null;
+            }
+        }
+        $this->orderCache[$orderId] = $order;
         return $this->orderCache[$orderId];
     }
 
@@ -395,7 +441,15 @@ final class AboutYouClient
         $payload = ['items' => [array_filter(['order_items' => $itemIds] + $extra, static fn ($v) => $v !== '' && $v !== null)]];
         $batchId = $this->submitBatch('POST', $endpoint, $payload);
         $result = $this->pollBatch($resultEndpoint, $batchId);
-        foreach ($this->normalizeBatchItems($result) as $item) {
+        $status = strtolower(trim((string) ($result['status'] ?? '')));
+        if ($status === 'failed') {
+            return false;
+        }
+        $items = $this->normalizeBatchItems($result);
+        if ($items === []) {
+            return false;
+        }
+        foreach ($items as $item) {
             if (!($item['success'] ?? false)) {
                 return false;
             }
@@ -405,7 +459,15 @@ final class AboutYouClient
 
     private function submitBatch(string $method, string $path, array $body): string
     {
-        $response = $this->request($method, $path, [], $body);
+        try {
+            $response = $this->request($method, $path, [], $body);
+        } catch (\Throwable $e) {
+            if ($method === 'POST' && $path === '/products/') {
+                $response = $this->request($method, '/products', [], $body);
+            } else {
+                throw $e;
+            }
+        }
         $batchId = (string) ($response['json']['batchRequestId'] ?? $response['json']['batch_request_id'] ?? '');
         if ($batchId === '') {
             throw new \RuntimeException('AboutYou batch request did not return a batch ID for ' . $path);
@@ -416,13 +478,17 @@ final class AboutYouClient
 
     private function pollBatch(string $path, string $batchId): array
     {
-        $attempts = max(3, (int) ($_ENV['AY_BATCH_POLL_ATTEMPTS'] ?? 10));
-        $baseSleepMs = max(400, (int) ($_ENV['AY_BATCH_POLL_MS'] ?? 1500));
+        // About You uses pending → processing → completed|failed|retry; large product batches can exceed ~30s.
+        $attempts = max(3, (int) ($_ENV['AY_BATCH_POLL_ATTEMPTS'] ?? 25));
+        $baseSleepMs = max(400, (int) ($_ENV['AY_BATCH_POLL_MS'] ?? 2000));
 
+        $lastStatus = '';
         for ($i = 0; $i < $attempts; $i++) {
             $response = $this->request('GET', $path, ['batch_request_id' => $batchId]);
             $body = $response['json'] ?? [];
-            $status = strtolower((string) ($body['status'] ?? 'completed'));
+            // Never default to completed: a missing status must keep polling until attempts exhausted.
+            $status = strtolower(trim((string) ($body['status'] ?? 'pending')));
+            $lastStatus = $status;
 
             if (in_array($status, ['completed', 'success'], true)) {
                 return $body;
@@ -442,7 +508,12 @@ final class AboutYouClient
             usleep($sleepMs * 1000);
         }
 
-        throw new \RuntimeException('Timed out while waiting for AboutYou batch result ' . $batchId);
+        throw new \RuntimeException(sprintf(
+            'Timed out while waiting for AboutYou batch result %s (last status=%s after %d polls). Increase AY_BATCH_POLL_ATTEMPTS and/or AY_BATCH_POLL_MS in .env if batches are large or the platform is slow.',
+            $batchId,
+            $lastStatus !== '' ? $lastStatus : 'unknown',
+            $attempts
+        ));
     }
 
     private function normalizeBatchItems(array $result): array
@@ -461,7 +532,7 @@ final class AboutYouClient
                 'errors' => $errors,
                 'error' => $success ? null : $errorText,
                 'reason_code' => $reasonCode,
-                'retryable' => !$success && in_array($reasonCode, ['ay_rate_limit', 'ay_timeout', 'ay_unknown'], true),
+                'retryable' => !$success && in_array($reasonCode, ['ay_rate_limit', 'ay_timeout', 'ay_transient', 'ay_unknown'], true),
             ];
         }
 
@@ -492,6 +563,31 @@ final class AboutYouClient
         return $requests;
     }
 
+    /**
+     * Normalizes `orders_from` to RFC3339 / ISO-8601 in UTC for GET /orders/.
+     */
+    private function formatOrdersFromFilter(string $since): string
+    {
+        $since = trim($since);
+        if ($since === '') {
+            return gmdate('c', time() - 86400);
+        }
+        try {
+            if (preg_match('/^\d{4}-\d{2}-\d{2}T/', $since)) {
+                return (new \DateTimeImmutable($since))->setTimezone(new \DateTimeZone('UTC'))->format('c');
+            }
+        } catch (\Throwable) {
+            // fall through to strtotime
+        }
+        $suffix = preg_match('/[zZ]|[+-]\d{2}:?\d{2}$/', $since) ? '' : ' UTC';
+        $ts = strtotime($since . $suffix);
+        if ($ts === false) {
+            $ts = time() - 86400;
+        }
+
+        return gmdate('c', $ts);
+    }
+
     private function request(string $method, string $path, array $query = [], array|string|null $body = null): array
     {
         $url = $this->baseUrl . $path;
@@ -505,9 +601,15 @@ final class AboutYouClient
             ? $this->policy->minIntervalMsForPath($path, $baseInterval)
             : $baseInterval;
 
+        $userAgent = trim((string) ($_ENV['AY_USER_AGENT'] ?? ''));
+        if ($userAgent === '') {
+            $userAgent = 'syncbridge/prestashop-aboutyou (PHP)';
+        }
+
         return $this->http->request('aboutyou', $method, $url, [
             'X-API-Key' => $this->apiKey,
             'Accept' => 'application/json',
+            'User-Agent' => $userAgent,
         ], $body, [
             'expect_json' => true,
             'min_interval_ms' => $policyInterval,
@@ -519,11 +621,17 @@ final class AboutYouClient
     {
         $candidates = [
             '/categories/' . $categoryId . '/attribute-groups',
+        ];
+        // Keep AY_ENABLE_LEGACY_ATTRIBUTE_ENDPOINTS in .env for backward compatibility;
+        // fallback candidates are now always attempted after the preferred endpoint.
+        $legacyCandidates = [
             '/categories/' . $categoryId . '/attribute_groups',
             '/categories/' . $categoryId . '/attributes',
             '/categories/' . $categoryId . '/attributes/',
             '/attributes',
         ];
+        // Always keep legacy fallback path available to avoid endpoint regressions.
+        $candidates = array_merge($candidates, $legacyCandidates);
 
         $payload = null;
         $last = null;

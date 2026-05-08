@@ -9,6 +9,11 @@ use SyncBridge\Database\ProductRepository;
 use SyncBridge\Database\SyncRunRepository;
 use SyncBridge\Services\SyncRunner;
 
+if (isHelpRequested($argv)) {
+    showHelp();
+    exit(0);
+}
+
 $pidPath = resolveSyncPidPath();
 registerPidFile($pidPath);
 
@@ -151,4 +156,15 @@ function showHelp(): void {
     echo "  order-status     - Push order status to AY\n";
     echo "  all              - Run products incrementally + stock + orders + order status\n";
     echo "  retry            - Process retry queue\n";
+}
+
+function isHelpRequested(array $argv): bool
+{
+    foreach (array_slice($argv, 1) as $arg) {
+        if ($arg === '--help' || $arg === '-h') {
+            return true;
+        }
+    }
+
+    return false;
 }

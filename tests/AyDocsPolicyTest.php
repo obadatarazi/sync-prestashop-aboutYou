@@ -22,4 +22,18 @@ final class AyDocsPolicyTest extends TestCase
 
         self::assertSame('ay_rate_limit', $policy->classifyAyError($message));
     }
+
+    public function testClassifyTransientUpstream(): void
+    {
+        $policy = new AyDocsPolicy();
+        self::assertSame('ay_transient', $policy->classifyAyError('Bad Gateway from seller API'));
+        self::assertSame('ay_transient', $policy->classifyAyError('Service Unavailable'));
+    }
+
+    public function testMinIntervalCoversOrderResultBatches(): void
+    {
+        $policy = new AyDocsPolicy();
+        $ship = $policy->minIntervalMsForPath('/results/ship-orders', 999);
+        self::assertLessThan(999, $ship);
+    }
 }

@@ -28,6 +28,9 @@ final class AyDocsPolicy
         '/results/status' => 200,
         '/results/stocks' => 200,
         '/results/prices' => 200,
+        '/results/ship-orders' => 200,
+        '/results/cancel-orders' => 200,
+        '/results/return-orders' => 200,
     ];
 
     /**
@@ -67,11 +70,19 @@ final class AyDocsPolicy
         ) {
             return 'ay_validation';
         }
-        if (str_contains($m, '429') || str_contains($m, 'rate limit')) {
+        if (str_contains($m, '429') || str_contains($m, 'rate limit') || str_contains($m, 'too many requests')) {
             return 'ay_rate_limit';
         }
         if (str_contains($m, '401') || str_contains($m, '403') || str_contains($m, 'api key')) {
             return 'ay_auth';
+        }
+        if (
+            str_contains($m, 'bad gateway')
+            || str_contains($m, 'service unavailable')
+            || str_contains($m, 'gateway timeout')
+            || str_contains($m, 'temporarily unavailable')
+        ) {
+            return 'ay_transient';
         }
         if (str_contains($m, 'timeout') || str_contains($m, 'timed out')) {
             return 'ay_timeout';
