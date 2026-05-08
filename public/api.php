@@ -68,6 +68,31 @@ function json_out(int $code, array $body): never
     exit;
 }
 
+function is_browser_navigation_request(string $method, string $action): bool
+{
+    if (strtoupper($method) !== 'GET') {
+        return false;
+    }
+
+    if ($action !== '') {
+        return false;
+    }
+
+    $xhrHeader = strtolower((string)($_SERVER['HTTP_X_REQUESTED_WITH'] ?? ''));
+    if ($xhrHeader === 'xmlhttprequest') {
+        return false;
+    }
+
+    $fetchMode = strtolower((string)($_SERVER['HTTP_SEC_FETCH_MODE'] ?? ''));
+    $fetchDest = strtolower((string)($_SERVER['HTTP_SEC_FETCH_DEST'] ?? ''));
+    if ($fetchMode !== '' || $fetchDest !== '') {
+        return $fetchMode === 'navigate' || $fetchDest === 'document';
+    }
+
+    $acceptHeader = strtolower((string)($_SERVER['HTTP_ACCEPT'] ?? ''));
+    return str_contains($acceptHeader, 'text/html');
+}
+
 function bounded_page_size(mixed $requested, int $default, int $max): int
 {
     $value = (int) $requested;
@@ -77,9 +102,15 @@ function bounded_page_size(mixed $requested, int $default, int $max): int
     return min($max, max(1, $value));
 }
 
-function require_auth(): void
+function require_auth(array $input, string $method): void
 {
     if (empty($_SESSION['authenticated'])) {
+        $action = (string)($input['action'] ?? '');
+        if (is_browser_navigation_request($method, $action)) {
+            header('Location: index.php', true, 302);
+            exit;
+        }
+
         json_out(401, ['ok' => false, 'error' => 'Not authenticated']);
     }
 }
@@ -438,7 +469,7 @@ if ($action === 'login') {
 // ----------------------------------------------------------------
 // All other routes require auth
 // ----------------------------------------------------------------
-require_auth();
+require_auth($input, $method);
 
 if ($action === 'logout') {
     require_csrf($input);
