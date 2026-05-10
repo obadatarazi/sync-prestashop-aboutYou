@@ -2944,7 +2944,6 @@ if ($action === 'sync') {
 if ($action === 'sync_stop') {
     require_csrf($input);
     $repo = new SyncRunRepository();
-    $current = $repo->getCurrent();
     $requestedRunId = trim((string) ($input['run_id'] ?? ''));
     $requestedRunIds = array_values(array_unique(array_filter(
         array_map(static fn (mixed $id): string => trim((string) $id), (array) ($input['run_ids'] ?? [])),
@@ -2952,6 +2951,10 @@ if ($action === 'sync_stop') {
     )));
     if ($requestedRunId !== '' && !in_array($requestedRunId, $requestedRunIds, true)) {
         $requestedRunIds[] = $requestedRunId;
+    }
+
+    if ($requestedRunIds === []) {
+        json_out(400, ['ok' => false, 'error' => 'run_id or run_ids is required']);
     }
 
     $targetRuns = [];
@@ -2974,8 +2977,6 @@ if ($action === 'sync_stop') {
             }
             $targetRuns[] = $byRunId[$runId];
         }
-    } elseif ($current) {
-        $targetRuns[] = $current;
     }
     $pidPath = resolveSyncPidPath();
     $pid = 0;
