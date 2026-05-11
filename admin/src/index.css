@@ -1,0 +1,85 @@
+@import 'tailwindcss';
+
+@theme {
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.9rem;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --shadow-sm: 0 2px 10px rgb(0 0 0 / 0.06);
+  --shadow-md: 0 18px 50px rgb(0 0 0 / 0.12);
+  --font-sans: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --color-background: oklch(0.974 0.012 264);
+  --color-surface: oklch(0.995 0.006 264);
+  --color-surface-elevated: oklch(1 0 0);
+  --color-border: oklch(0.89 0.01 264);
+  --color-text: oklch(0.24 0.018 264);
+  --color-muted: oklch(0.52 0.02 264);
+  --color-primary: oklch(0.56 0.2 272);
+  --color-primary-foreground: oklch(0.98 0 0);
+  --color-accent: var(--color-primary);
+}
+
+.dark {
+  color-scheme: dark;
+  --color-background: oklch(0.18 0.02 268);
+  --color-surface: oklch(0.22 0.024 268);
+  --color-surface-elevated: oklch(0.26 0.03 268);
+  --color-border: oklch(0.36 0.03 268);
+  --color-text: oklch(0.95 0.01 264);
+  --color-muted: oklch(0.74 0.018 264);
+  --color-primary: oklch(0.74 0.14 274);
+  --color-primary-foreground: oklch(0.1 0 0);
+  --color-accent: var(--color-primary);
+}
+
+html {
+  @apply bg-[var(--color-background)] text-[var(--color-text)] antialiased;
+}
+
+body {
+  @apply min-h-screen bg-[radial-gradient(circle_at_top,_oklch(0.95_0.05_270)_0%,_transparent_45%),var(--color-background)];
+}
+
+.dark body {
+  @apply bg-[radial-gradient(circle_at_top,_oklch(0.3_0.08_278)_0%,_transparent_45%),var(--color-background)];
+}
+
+#root {
+  @apply min-h-screen;
+}
+
+.table-shell {
+  @apply overflow-x-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] shadow-sm;
+}
+
+.table-ui {
+  @apply min-w-full border-collapse text-sm;
+}
+
+.table-ui thead {
+  @apply sticky top-0 z-10 bg-[color-mix(in_oklab,var(--color-surface-elevated)_85%,white_15%)] shadow-sm dark:bg-[color-mix(in_oklab,var(--color-surface-elevated)_90%,black_10%)];
+}
+
+.table-ui thead tr {
+  @apply border-b border-[var(--color-border)] text-left text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)];
+}
+
+.table-ui tbody tr {
+  @apply border-b border-[var(--color-border)]/70 transition-colors;
+}
+
+.table-ui tbody tr:hover {
+  @apply bg-zinc-50/80 dark:bg-zinc-900/40;
+}
+
+.table-empty {
+  @apply px-6 py-16 text-center text-sm text-[var(--color-muted)];
+}
+
+/* Focus rings for a11y */
+:focus-visible {
+  @apply outline-2 outline-offset-2 outline-[var(--color-primary)];
+}

@@ -1,0 +1,12 @@
+{
+  "dashboard": "Dashboard",
+  "products": "Products",
+  "orders": "Orders",
+  "sync": "Sync control",
+  "settings": "Settings",
+  "logs": "Run history",
+  "retry": "Retry queue",
+  "mappings": "Mappings",
+  "images": "Image diagnostics",
+  "login": "Sign in"
+}

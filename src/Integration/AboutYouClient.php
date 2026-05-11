@@ -15,11 +15,15 @@ final class AboutYouClient
     private AyDocsPolicy $policy;
     /** @var array<string,array|null> */
     private array $orderCache = [];
+    private bool $verboseDebugEnabled;
+    private string $verboseDebugPath;
 
     public function __construct(private readonly HttpClient $http)
     {
         $this->baseUrl = rtrim((string) ($_ENV['AY_BASE_URL'] ?? 'https://partner.aboutyou.com/api/v1'), '/');
         $this->apiKey = (string) ($_ENV['AY_API_KEY'] ?? '');
+        $this->verboseDebugEnabled = filter_var($_ENV['AY_DEBUG_VERBOSE'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        $this->verboseDebugPath = (string) ($_ENV['AY_DEBUG_LOG_PATH'] ?? (__DIR__ . '/../../logs/ay_http_debug.log'));
 
         if ($this->apiKey === '') {
             throw new \RuntimeException('AboutYou is not configured. Set AY_API_KEY.');
@@ -427,6 +431,17 @@ final class AboutYouClient
         return array_keys($found);
     }
 
+    public function getProducts(array $filters = []): array
+    {
+        $query = array_filter($filters, static fn (mixed $value): bool => $value !== null && $value !== '');
+        $response = $this->request('GET', '/products/', $query);
+        $payload = $response['json'] ?? [];
+        $items = is_array($payload) && array_is_list($payload)
+            ? $payload
+            : ($payload['items'] ?? $payload['products'] ?? []);
+        return is_array($items) ? array_values(array_filter($items, 'is_array')) : [];
+    }
+
     private function shipOrderItems(array $itemIds, string $carrierKey, array $extra): bool
     {
         return $this->changeOrderItemStatus('/orders/ship', '/results/ship-orders', $itemIds, [
@@ -606,15 +621,25 @@ final class AboutYouClient
             $userAgent = 'syncbridge/prestashop-aboutyou (PHP)';
         }
 
-        return $this->http->request('aboutyou', $method, $url, [
+        $headers = [
             'X-API-Key' => $this->apiKey,
             'Accept' => 'application/json',
             'User-Agent' => $userAgent,
-        ], $body, [
+        ];
+        $options = [
             'expect_json' => true,
             'min_interval_ms' => $policyInterval,
             'timeout' => (int) ($_ENV['AY_TIMEOUT_SEC'] ?? 60),
-        ]);
+        ];
+
+        try {
+            $response = $this->http->request('aboutyou', $method, $url, $headers, $body, $options);
+            $this->debugVerbose($method, $url, $headers, $body, $response);
+            return $response;
+        } catch (\Throwable $e) {
+            $this->debugVerbose($method, $url, $headers, $body, null, $e);
+            throw $e;
+        }
     }
 
     private function getCategoryAttributeGroups(int $categoryId): array
@@ -693,5 +718,78 @@ final class AboutYouClient
         }
 
         return $groups;
+    }
+
+    private function debugVerbose(
+        string $method,
+        string $url,
+        array $headers,
+        array|string|null $body,
+        ?array $response = null,
+        ?\Throwable $exception = null
+    ): void {
+        if (!$this->verboseDebugEnabled) {
+            return;
+        }
+
+        $dir = dirname($this->verboseDebugPath);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+
+        $payload = [
+            'ts' => gmdate('c'),
+            'method' => strtoupper($method),
+            'url' => $url,
+            'request_headers' => $this->maskHeaders($headers),
+            'request_body' => is_array($body)
+                ? $body
+                : ($body !== null ? $this->decodeJsonString($body) : null),
+            'response_status' => $response['status'] ?? null,
+            'response_headers' => $response['headers'] ?? null,
+            'response_body' => isset($response['body']) ? $this->decodeJsonString((string) $response['body']) : null,
+            'exception' => $exception ? [
+                'class' => get_class($exception),
+                'message' => $exception->getMessage(),
+            ] : null,
+            'account' => [
+                'base_url' => $this->baseUrl,
+                'api_key_prefix' => substr($this->apiKey, 0, 12),
+                'merchant_id' => (string) ($_ENV['AY_MERCHANT_ID'] ?? ''),
+                'test_mode' => (string) ($_ENV['TEST_MODE'] ?? ''),
+            ],
+        ];
+
+        @file_put_contents(
+            $this->verboseDebugPath,
+            json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL,
+            FILE_APPEND | LOCK_EX
+        );
+    }
+
+    private function maskHeaders(array $headers): array
+    {
+        $masked = [];
+        foreach ($headers as $name => $value) {
+            if (strtolower((string) $name) === 'x-api-key') {
+                $masked[$name] = substr((string) $value, 0, 8) . '***';
+                continue;
+            }
+            $masked[$name] = $value;
+        }
+        return $masked;
+    }
+
+    private function decodeJsonString(string $value): mixed
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return '';
+        }
+        try {
+            return json_decode($trimmed, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\Throwable) {
+            return $trimmed;
+        }
     }
 }

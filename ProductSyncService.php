@@ -349,6 +349,11 @@ class ProductSyncService
                 $pushStartedAt = microtime(true);
                 $results = $this->ay->upsertProducts($ayProduct['variants']);
                 $pushElapsedMs = (int) round((microtime(true) - $pushStartedAt) * 1000);
+                if ($results === []) {
+                    throw new \RuntimeException(
+                        'AboutYou push returned an empty batch result. The API call was accepted, but no item-level outcome was returned; treating this as unverified instead of success.'
+                    );
+                }
                 $hasError = false;
                 foreach ($results as $res) {
                     if (isset($res['error'])) {
@@ -386,6 +391,8 @@ class ProductSyncService
                     ], 'AY push returned error');
                     $this->stats['failed']++;
                 } else {
+                    $verification = $this->verifyProductOnAboutYou((string) ($ayProduct['style_key'] ?? ''));
+                    $this->logger->info("AY verification PS#{$psId}", $verification);
                     // ── 6. Mark synced ────────────────────────────────
                     $this->products->markSynced($productId, $ayProduct['style_key']);
                     $this->retryJobs->markDone('product_push', (string) $psId);
@@ -394,6 +401,7 @@ class ProductSyncService
                         'variants' => count($ayProduct['variants']),
                         'push_elapsed_ms' => $pushElapsedMs,
                         'reason_code' => 'success',
+                        'verification' => $verification,
                     ]);
                 }
 
@@ -524,6 +532,60 @@ class ProductSyncService
             return 'auth';
         }
         return 'transport_unknown';
+    }
+
+    private function verifyProductOnAboutYou(string $styleKey): array
+    {
+        $styleKey = trim($styleKey);
+        if ($styleKey === '') {
+            return [
+                'verified' => false,
+                'reason_code' => 'missing_style_key',
+                'message' => 'No style key available for AboutYou verification.',
+            ];
+        }
+
+        try {
+            $items = $this->ay->getProducts([
+                'style_key' => $styleKey,
+                'per_page' => 100,
+            ]);
+        } catch (\Throwable $e) {
+            return [
+                'verified' => false,
+                'reason_code' => 'verification_failed',
+                'message' => $e->getMessage(),
+                'style_key' => $styleKey,
+            ];
+        }
+
+        if ($items === []) {
+            return [
+                'verified' => false,
+                'reason_code' => 'not_found_after_push',
+                'message' => 'Product not found on AboutYou immediately after push.',
+                'style_key' => $styleKey,
+            ];
+        }
+
+        $statusCounts = [];
+        $skus = [];
+        foreach ($items as $item) {
+            $status = trim((string) ($item['status'] ?? 'unknown'));
+            $statusCounts[$status] = ($statusCounts[$status] ?? 0) + 1;
+            $sku = trim((string) ($item['sku'] ?? ''));
+            if ($sku !== '') {
+                $skus[] = $sku;
+            }
+        }
+
+        return [
+            'verified' => true,
+            'style_key' => $styleKey,
+            'variant_count' => count($items),
+            'status_counts' => $statusCounts,
+            'sample_skus' => array_slice(array_values(array_unique($skus)), 0, 10),
+        ];
     }
 
     private function applyVariantEanOverrides(int $productId, array $combinations): array

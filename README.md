@@ -165,10 +165,6 @@ php bin/sync.php status            # Show current stats
 
 ## Safety Modes
 
-```bash
-# In .env:
-TEST_MODE=true   # No writes to AY API
-DRY_RUN=true     # No writes to PS or DB (reads only)
-```
+In the Laravel 11 app (`laravel11/`), **test mode** and **dry run** are stored as `test_mode` and `dry_run` boolean rows in the `settings` table (default seeder turns both on for a safe first boot). Toggle them from the Settings panel or `POST /api/v1/settings`.
 
-Toggle from Settings panel in UI.
+Legacy `bin/sync.php` / non-Laravel workers may still read `TEST_MODE` / `DRY_RUN` from `.env` where applicable.

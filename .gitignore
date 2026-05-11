@@ -2,3 +2,5 @@
 .env
 .vendor/
 public/.env
+.cursor/
+logs/

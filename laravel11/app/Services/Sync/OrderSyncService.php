@@ -1,0 +1,315 @@
+<?php
+
+namespace App\Services\Sync;
+
+use App\Repositories\OrderRepository;
+use App\Repositories\ProductRepository;
+use App\Repositories\RetryJobRepository;
+use App\Repositories\SyncRunRepository;
+
+/**
+ * OrderSyncService
+ *
+ * Flow:
+ *   Import:       AY orders → local DB → PrestaShop
+ *   Status push:  PrestaShop order state → AY order status
+ */
+class OrderSyncService
+{
+    private OrderRepository   $orders;
+    private ProductRepository $products;
+    private SyncRunRepository $runs;
+    private RetryJobRepository $retryJobs;
+    private DbSyncLogger      $logger;
+    private string $runId;
+    private mixed $ps;
+    private mixed $ay;
+    private mixed $mapper;
+    private int $maxAttempts;
+    private bool $dryRun;
+
+    private array $stats = [
+        'ay_orders_fetched' => 0,
+        'orders_imported'   => 0,
+        'orders_skipped'    => 0,
+        'orders_failed'     => 0,
+        'statuses_pushed'   => 0,
+        'status_push_failed'=> 0,
+    ];
+
+    public function __construct(string $runId, mixed $ps, mixed $ay, mixed $mapper, bool $dryRun = false)
+    {
+        $this->runId       = $runId;
+        $this->ps          = $ps;
+        $this->ay          = $ay;
+        $this->mapper      = $mapper;
+        $this->dryRun      = $dryRun;
+        $this->orders      = new OrderRepository();
+        $this->products    = new ProductRepository();
+        $this->runs        = new SyncRunRepository();
+        $this->retryJobs   = new RetryJobRepository();
+        $this->logger      = new DbSyncLogger($runId, 'orders', $dryRun);
+        $this->maxAttempts = (int)($_ENV['ORDER_IMPORT_MAX_ATTEMPTS'] ?? 3);
+    }
+
+    // ----------------------------------------------------------------
+    // IMPORT  AY → DB → PS
+    // ----------------------------------------------------------------
+
+    public function importNewOrders(?string $since = null): array
+    {
+        $this->resetStats();
+        $this->logger->info('OrderSyncService::importNewOrders started');
+
+        $ayOrders = $this->ay->getNewOrders($since);
+        $this->stats['ay_orders_fetched'] = count($ayOrders);
+        $this->logger->info("Fetched {$this->stats['ay_orders_fetched']} new orders from AboutYou");
+
+        foreach ($ayOrders as $ayOrder) {
+            $this->importSingleOrder($ayOrder);
+        }
+
+        $this->logger->info('OrderSyncService::importNewOrders completed', $this->stats);
+        return $this->stats;
+    }
+
+    public function retryImportByAyOrderId(string $ayOrderId): bool
+    {
+        $ayOrderId = trim($ayOrderId);
+        if ($ayOrderId === '') {
+            throw new \InvalidArgumentException('Missing AY order id for retry import.');
+        }
+        $order = $this->ay->getOrder($ayOrderId);
+        if (!is_array($order) || $order === []) {
+            throw new \RuntimeException('AboutYou order not found for retry import: ' . $ayOrderId);
+        }
+        return $this->importSingleOrder($order);
+    }
+
+    private function importSingleOrder(array $ayOrder): bool
+    {
+        $ayId = (string)($ayOrder['id'] ?? $ayOrder['order_id'] ?? $ayOrder['order_number'] ?? '');
+        if (!$ayId) { $this->stats['orders_skipped']++; return false; }
+
+        // Dedup check
+        if ($this->orders->isProcessed($ayId)) {
+            $this->stats['orders_skipped']++;
+            return true;
+        }
+
+        // Check quarantine
+        $existing = $this->orders->findByAyOrderId($ayId);
+        if ($existing && $existing['sync_status'] === 'quarantined') {
+            $this->stats['orders_skipped']++;
+            $this->logger->warning("Order {$ayId} is quarantined — skipping");
+            return false;
+        }
+
+        if ($this->dryRun) {
+            $this->logger->info("DRY_RUN would import AY#{$ayId} (no DB / PrestaShop / AY writes)");
+            $this->stats['orders_skipped']++;
+            return true;
+        }
+
+        try {
+            // ── 1. Save to DB ─────────────────────────────────────────
+            $orderId = $this->orders->createFromAy($ayOrder, $ayId);
+
+            // ── 2. Map AY order to PS structure ───────────────────────
+            $mapped = $this->mapper->mapAyOrderToPs($ayOrder);
+
+            // ── 3. Save order items to DB ──────────────────────────────
+            $this->orders->saveItems($orderId, $mapped['items'] ?? []);
+
+            // ── 4. Resolve items to PS product/combo IDs ──────────────
+            $resolved = $this->resolveItems($mapped['items'] ?? [], $ayId);
+            if (empty($resolved)) {
+                throw new \RuntimeException("Could not resolve any items to PS products for AY#{$ayId}");
+            }
+
+            // ── 5. Find/create PS customer ────────────────────────────
+            $psCustomerId = $this->ps->findOrCreateCustomer($mapped['customer']);
+            if (!$psCustomerId) {
+                throw new \RuntimeException("Could not find/create PS customer for AY#{$ayId}");
+            }
+
+            // ── 6. Create PS address ──────────────────────────────────
+            $psAddressId = $this->ps->findOrCreateAddress($psCustomerId, $mapped['address']);
+            if (!$psAddressId) {
+                throw new \RuntimeException("Could not create PS address for AY#{$ayId}");
+            }
+
+            // ── 7. Create PS order ────────────────────────────────────
+            $orderPayload = array_merge($mapped, [
+                'id_customer'         => $psCustomerId,
+                'id_address_delivery' => $psAddressId,
+                'id_address_invoice'  => $psAddressId,
+                'id_cart'             => 0,
+                'items'               => $resolved,
+            ]);
+            $psOrderId = $this->ps->createOrder($orderPayload);
+            if (!$psOrderId) {
+                throw new \RuntimeException("Failed to create PS order for AY#{$ayId}");
+            }
+
+            // ── 8. Mark imported in DB ────────────────────────────────
+            $this->orders->markImported($ayId, (int)$psOrderId);
+
+            // ── 9. Update item product_id/combo_id in DB ──────────────
+            foreach ($resolved as $item) {
+                \App\Support\Database::execute(
+                    "UPDATE order_items SET product_id=?, combo_id=? WHERE order_id=? AND sku=?",
+                    [$item['product_id'], $item['combo_id'] ?? null, $orderId, $item['sku'] ?? '']
+                );
+            }
+
+            $this->stats['orders_imported']++;
+            $this->logger->info("✓ Imported AY#{$ayId} → PS#{$psOrderId}");
+            $this->retryJobs->markDone('order_import', $ayId);
+
+            // Acknowledge in AY
+            $this->ay->updateOrderStatus($ayId, 'processing');
+            return true;
+
+        } catch (\Throwable $e) {
+            $this->stats['orders_failed']++;
+            $permanent = $this->isPermanent($e);
+            $this->orders->markError($ayId, $e->getMessage(), $permanent);
+            $this->logger->error("✗ Failed AY#{$ayId}: " . $e->getMessage());
+            if (!$permanent) {
+                $this->retryJobs->enqueue('order_import', $ayId, ['ay_order_id' => $ayId], $e->getMessage());
+            }
+            return false;
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // STATUS PUSH  PS → AY
+    // ----------------------------------------------------------------
+
+    public function pushOrderStatusUpdates(?string $since = null): array
+    {
+        $this->resetStats();
+        $since = $since ?? date('Y-m-d H:i:s', strtotime('-1 hour'));
+        $this->logger->info("OrderSyncService::pushOrderStatusUpdates since {$since}");
+
+        $psOrders = $this->ps->getOrdersModifiedSince($since);
+        foreach ($psOrders as $psOrder) {
+            $psId  = (int)($psOrder['id'] ?? 0);
+            $ayRow = \App\Support\Database::fetchOne(
+                'SELECT ay_order_id, ay_status FROM orders WHERE ps_order_id = ?', [$psId]
+            );
+            if (!$ayRow) continue;
+
+            $ayStatus = $this->mapper->mapPsStatusToAy($psOrder);
+            $existingAyStatus = strtolower(trim((string) ($ayRow['ay_status'] ?? '')));
+            $idempotentStatusPush = filter_var($_ENV['FEATURE_IDEMPOTENT_STATUS_PUSH'] ?? true, FILTER_VALIDATE_BOOLEAN);
+            if ($idempotentStatusPush && $existingAyStatus !== '' && $existingAyStatus === strtolower($ayStatus)) {
+                // Idempotency safeguard: avoid duplicate status pushes.
+                continue;
+            }
+            if ($this->dryRun) {
+                $this->logger->info("DRY_RUN would push PS#{$psId} → AY status {$ayStatus}", [
+                    'ay_order_id' => $ayRow['ay_order_id'],
+                ]);
+                $this->stats['orders_skipped']++;
+                continue;
+            }
+            $extra = [];
+            $shippingNumber = trim((string) ($psOrder['shipping_number'] ?? ''));
+            if ($shippingNumber !== '' && in_array($ayStatus, ['shipped', 'returned'], true)) {
+                // 'shipped' uses tracking_number directly; 'returned' falls back to it for return_tracking_key.
+                $extra['tracking_number'] = $shippingNumber;
+            }
+
+            if ($this->ay->updateOrderStatus($ayRow['ay_order_id'], $ayStatus, $extra)) {
+                $this->orders->markStatusPushed($ayRow['ay_order_id'], $ayStatus);
+                $this->retryJobs->markDone('order_status', (string) $ayRow['ay_order_id']);
+                $this->stats['statuses_pushed']++;
+                $this->logger->info("✓ Status PS#{$psId} → AY: {$ayStatus}");
+            } else {
+                $this->stats['status_push_failed']++;
+                $this->logger->error("✗ Status push failed PS#{$psId}");
+                $this->retryJobs->enqueue('order_status', (string) $ayRow['ay_order_id'], [
+                    'ps_order_id' => $psId,
+                    'ay_status' => $ayStatus,
+                    'extra' => $extra,
+                ], 'Status push failed');
+            }
+        }
+
+        $this->logger->info('OrderSyncService::pushOrderStatusUpdates completed', $this->stats);
+        return $this->stats;
+    }
+
+    // ----------------------------------------------------------------
+    // HELPERS
+    // ----------------------------------------------------------------
+
+    private function resolveItems(array $items, string $ayId): array
+    {
+        $resolved = [];
+        foreach ($items as $item) {
+            $sku = trim((string)($item['sku'] ?? ''));
+            $ean = trim((string)($item['ean'] ?? $item['ean13'] ?? ''));
+
+            // Try DB mapping first (fastest)
+            $dbRow = null;
+            if ($sku !== '') {
+                $dbRow = \App\Support\Database::fetchOne(
+                    "SELECT v.product_id AS product_id, v.ps_combo_id AS combo_id
+                     FROM product_variants v WHERE UPPER(v.sku) = UPPER(?) LIMIT 1",
+                    [$sku]
+                );
+            }
+            if ($dbRow === null && $ean !== '') {
+                $dbRow = \App\Support\Database::fetchOne(
+                    "SELECT v.product_id AS product_id, v.ps_combo_id AS combo_id
+                     FROM product_variants v WHERE v.ean13 = ? LIMIT 1",
+                    [$ean]
+                );
+            }
+            if ($dbRow) {
+                $resolved[] = array_merge($item, $dbRow);
+                continue;
+            }
+
+            // Deterministic precedence: SKU reference, then EAN.
+            if ($sku !== '') {
+                $combo = $this->ps->findCombinationByReference($sku);
+                if ($combo) { $resolved[] = array_merge($item, $combo); continue; }
+
+                $prodId = $this->ps->findProductIdByReference($sku);
+                if ($prodId) { $resolved[] = array_merge($item, ['product_id' => $prodId, 'combo_id' => 0]); continue; }
+            }
+
+            if ($ean !== '') {
+                $comboByEan = $this->ps->findCombinationByEan($ean);
+                if ($comboByEan) { $resolved[] = array_merge($item, $comboByEan); continue; }
+                $prodByEan = $this->ps->findProductIdByEan($ean);
+                if ($prodByEan) { $resolved[] = array_merge($item, ['product_id' => $prodByEan, 'combo_id' => 0]); continue; }
+            }
+
+            $this->logger->warning("Could not resolve order item to PS product", ['sku' => $sku, 'ean13' => $ean]);
+        }
+        return $resolved;
+    }
+
+    private function isPermanent(\Throwable $e): bool
+    {
+        $hints = ['validation error','missing or invalid','could not resolve','could not find/create'];
+        $msg = strtolower($e->getMessage());
+        foreach ($hints as $h) if (str_contains($msg, $h)) return true;
+        return false;
+    }
+
+    private function resetStats(): void
+    {
+        $this->stats = [
+            'ay_orders_fetched' => 0, 'orders_imported' => 0, 'orders_skipped' => 0,
+            'orders_failed' => 0, 'statuses_pushed' => 0, 'status_push_failed' => 0,
+        ];
+    }
+
+    public function getStats(): array { return $this->stats; }
+}
